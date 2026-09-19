@@ -1,0 +1,129 @@
+{
+  "title": "Trance Gate",
+  "children": [
+    {
+      "title": "Overview",
+      "lines": [
+        "Tempo-locked step",
+        "gate with a per-step",
+        "ADSR.",
+        "",
+        "The ring is the",
+        "pattern. Filled arcs",
+        "are steps that",
+        "sound, hollow ones",
+        "are gaps.",
+        "",
+        "Thickness is the",
+        "step's Amount.",
+        "",
+        "A dot inside the",
+        "ring is the",
+        "playhead. A bracket",
+        "outside it is the",
+        "step you are",
+        "editing."
+      ]
+    },
+    {
+      "title": "Pads",
+      "lines": [
+        "One pad per step,",
+        "from the bottom",
+        "left.",
+        "",
+        "Green: the step",
+        " sounds.",
+        "Red: it is a gap.",
+        "Bright: the step you",
+        " are editing.",
+        "Dark: past the end",
+        " of the pattern.",
+        "",
+        "A press toggles the",
+        "step AND selects it,",
+        "so the knobs edit",
+        "what you just hit."
+      ]
+    },
+    {
+      "title": "Controls",
+      "children": [
+        {
+          "title": "Gate Page",
+          "lines": [
+            "Knob 1: Step",
+            " Moves the bracket.",
+            "",
+            "Knob 2: Gate",
+            " Off, On or Tie.",
+            " A Tie holds through",
+            " the next step",
+            " without a",
+            " retrigger.",
+            "",
+            "Knob 3: Amount",
+            " How far THIS step",
+            " closes the gate.",
+            "",
+            "Knob 4: Rnd",
+            " Click to generate",
+            " a new pattern.",
+            "",
+            "Knob 5: Len",
+            "Knob 6: Rate"
+          ]
+        },
+        {
+          "title": "Settings Page",
+          "lines": [
+            "Attack, Decay,",
+            "Sustain, Release",
+            "shape every step.",
+            "",
+            "Amount scales the",
+            "whole sequence. It",
+            "is the same quantity",
+            "as the per-step",
+            "Amount, one scope",
+            "up.",
+            "",
+            "Slot picks one of 8",
+            "patterns.",
+            "",
+            "Stop says what",
+            "happens with no",
+            "transport. Open",
+            "holds the gate open,",
+            "Free keeps running",
+            "at the last tempo."
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Timing",
+      "lines": [
+        "The gate follows",
+        "song position, so",
+        "it stays bar-aligned",
+        "however long it runs",
+        "and survives a seek.",
+        "",
+        "Rate is one step's",
+        "length. At 1/16 a",
+        "16-step pattern is",
+        "one bar.",
+        "",
+        "Times are in ms and",
+        "are NOT synced: a",
+        "1/16 step is",
+        "15000/BPM ms, so 125",
+        "ms at 120. Keep",
+        "Attack plus Decay",
+        "under that or a step",
+        "never reaches full."
+      ]
+    }
+  ]
+}

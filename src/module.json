@@ -1,0 +1,18 @@
+{
+  "id": "trance-gate",
+  "name": "Trance Gate",
+  "abbrev": "TG",
+  "version": "0.0.1",
+  "description": "Tempo-locked step gate with ADSR, ties and pad editing",
+  "author": "graebe",
+  "license": "MIT",
+  "dsp": "trance-gate.so",
+  "api_version": 2,
+  "ui_chain": "ui_chain.js",
+  "capabilities": {
+    "chainable": true,
+    "component_type": "audio_fx",
+    "midi_in": true,
+    "requires_continuous_processing": true
+  }
+}
