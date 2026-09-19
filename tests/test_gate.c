@@ -506,6 +506,50 @@ int main(void) {
     check_near("and it sounds the same as it did under v2", lvl, 7500.0, 120.0);
     api->destroy_instance(inst);
 
+    /* --- gate length ------------------------------------------------------ */
+    printf("gate length (sustain has a LEVEL, not a duration):\n");
+    inst = api->create_instance(NULL, NULL);
+    set(api, inst, "attack", "0");  set(api, inst, "decay", "0");
+    set(api, inst, "sustain", "1"); set(api, inst, "release", "0");
+    set(api, inst, "length", "16"); set(api, inst, "amount", "1");
+    set(api, inst, "pattern", "FFFF");          /* every step on */
+    check("gate length defaults to the whole step",
+          strcmp(get(api, inst, "hold"), "1.00") == 0);
+
+    /* A full-length gate is open all the way across a step. */
+    g_beats = 0.0;
+    lvl = run_dc(api, inst, 5000, 10000);
+    check_near("at 100% the step never closes", lvl, 10000.0, 60.0);
+
+    /* Half length: open for the first half, shut for the second. One 1/16
+     * step at 120 BPM is 5512 samples, so the halves are 0..2756 and
+     * 2756..5512. */
+    set(api, inst, "hold", "0.5");
+    g_beats = 0.0;
+    lvl = run_dc(api, inst, 2600, 10000);
+    check_near("the first half of the step is open", lvl, 10000.0, 60.0);
+    run_dc(api, inst, 300, 10000);              /* cross the gate edge */
+    lvl = run_dc(api, inst, 2400, 10000);
+    check_near("the second half is shut", lvl, 0.0, 60.0);
+
+    /* A TIE means hold through, so it must override the shortening or the two
+     * controls would contradict each other. */
+    set(api, inst, "ties", "FFFF");
+    g_beats = 0.0;
+    run_dc(api, inst, 3000, 10000);             /* past where it would close */
+    lvl = run_dc(api, inst, 2000, 10000);
+    check_near("a tied step is not cut short", lvl, 10000.0, 60.0);
+    api->destroy_instance(inst);
+
+    /* An old blob has no gate length, and absent must mean the whole step --
+     * anything else shortens every gate in every patch that already works. */
+    inst = api->create_instance(NULL, NULL);
+    set(api, inst, "state",
+        "{\"sv\":2,\"slot\":0,\"rate\":\"1/16\",\"mix\":1.000,\"p0\":\"FFFF:0:16\"}");
+    check("a blob without a gate length loads at 100%",
+          strcmp(get(api, inst, "hold"), "1.00") == 0);
+    api->destroy_instance(inst);
+
     printf("\n%s (%d failure%s)\n", g_failures ? "FAILED" : "PASS",
            g_failures, g_failures == 1 ? "" : "s");
     return g_failures ? 1 : 0;

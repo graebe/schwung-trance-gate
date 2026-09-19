@@ -29,8 +29,7 @@
       "title": "Pads",
       "lines": [
         "One pad per step,",
-        "from the bottom",
-        "left.",
+        "from the top left.",
         "",
         "Green: the step",
         " sounds.",
@@ -43,7 +42,17 @@
         "A press toggles the",
         "step AND selects it,",
         "so the knobs edit",
-        "what you just hit."
+        "what you just hit.",
+        "",
+        "SHIFT + press sets a",
+        "tie: the step holds",
+        "through the next one",
+        "without retriggering",
+        "the envelope.",
+        "",
+        "A pad IS the step,",
+        "so there is no knob",
+        "for choosing one."
       ]
     },
     {
@@ -52,26 +61,22 @@
         {
           "title": "Gate Page",
           "lines": [
-            "Knob 1: Step",
-            " Moves the bracket.",
-            "",
-            "Knob 2: Gate",
-            " Off, On or Tie.",
-            " A Tie holds through",
-            " the next step",
-            " without a",
-            " retrigger.",
-            "",
-            "Knob 3: Amount",
+            "Knob 1: Amount",
             " How far THIS step",
             " closes the gate.",
+            " Pick the step with",
+            " a pad first.",
             "",
-            "Knob 4: Rnd",
+            "Knob 2: Rnd",
             " Click to generate",
             " a new pattern.",
             "",
-            "Knob 5: Len",
-            "Knob 6: Rate"
+            "Knob 3: Len",
+            " Steps in the",
+            "  pattern, 1-32.",
+            "",
+            "Knob 4: Rate",
+            " Length of one step."
           ]
         },
         {

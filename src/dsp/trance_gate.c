@@ -131,8 +131,21 @@ typedef struct tg_instance {
     int   rate_idx;
     float attack_ms;
     float decay_ms;
-    float sustain;        /* 0..1 */
+    float sustain;        /* 0..1 -- a LEVEL, not a duration */
     float release_ms;
+    /*
+     * How much of a step the gate stays open, 0..1.
+     *
+     * SUSTAIN IS A LEVEL AND HAS NO LENGTH -- in an ADSR it simply holds until
+     * the note ends, and here "the note" is the step. That is correct and it
+     * is also not what someone reaching for a shorter gate wants. This is the
+     * control they are reaching for: release begins this far into the step
+     * rather than at its end, which is a sequencer's gate length.
+     *
+     * 1.0 is the old behaviour exactly -- release at the boundary -- so it
+     * costs a default, not a migration.
+     */
+    float hold;
     /* How much the gate acts, 0..1. 1 == a closed gate is silent, 0 == the
      * effect is bypassed. This is the old `depth` AND the old `mix`: they were
      * one quantity with two names (see TG_STATE_VERSION), so it has one now. */
@@ -422,6 +435,16 @@ static void v2_process_block(void *instance, int16_t *audio_inout, int frames) {
             double err = target - in->step_pos;
             if (err > TG_RESYNC_STEPS || err < -TG_RESYNC_STEPS) {
                 in->step_pos = target;       /* loop, seek or tempo jump */
+                /*
+                 * A JUMP RE-EVALUATES THE STEP, even when it lands on the same
+                 * index. The boundary test is `step != last_step`, so a seek
+                 * back onto the step we were already on fires nothing and the
+                 * envelope keeps whatever state the old position left it in --
+                 * typically released, so the step is silent until the pattern
+                 * comes round again. Forgetting the last step makes the next
+                 * sample a boundary and the gate re-reads the pattern.
+                 */
+                in->last_step = -1;
             } else {
                 inc += (err * TG_TRACK_GAIN) / (double)frames;
             }
@@ -459,6 +482,23 @@ static void v2_process_block(void *instance, int16_t *audio_inout, int frames) {
         if (step != in->last_step) {
             on_step_boundary(in, p, in->last_step, step);
             in->last_step = step;
+        }
+
+        /*
+         * GATE LENGTH: release inside the step, not only at its edge.
+         *
+         * Only for a step that is ON and is NOT tied into the next one -- a
+         * tie means "hold through", so shortening it would contradict the tie
+         * and make the two controls fight. Below 1.0 this is what shortens the
+         * gate; at 1.0 the condition never fires and the envelope releases on
+         * the boundary exactly as before.
+         */
+        if (in->hold < 1.0f && in->env_stage != TG_RELEASE && in->env_stage != TG_IDLE) {
+            double frac = in->step_pos - floor(in->step_pos);
+            if (frac >= (double)in->hold &&
+                !(pat_step_on(p, step) && pat_step_tied(p, step))) {
+                env_enter(in, TG_RELEASE);
+            }
         }
 
         env_advance(in);
@@ -507,6 +547,7 @@ static void *v2_create_instance(const char *module_dir, const char *config_json)
     in->decay_ms = 20.0f;
     in->sustain = 1.0f;
     in->release_ms = 20.0f;
+    in->hold = 1.0f;
     in->amount = 1.0f;
     in->stopped_mode = TG_STOPPED_OPEN;
 
@@ -555,6 +596,8 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
         in->decay_ms = clampf((float)atof(val), 0.0f, 500.0f);
     } else if (strcmp(key, "sustain") == 0) {
         in->sustain = clampf((float)atof(val), 0.0f, 1.0f);
+    } else if (strcmp(key, "hold") == 0) {
+        in->hold = clampf((float)atof(val), 0.0f, 1.0f);
     } else if (strcmp(key, "release") == 0) {
         in->release_ms = clampf((float)atof(val), 0.0f, 500.0f);
     } else if (strcmp(key, "amount") == 0) {
@@ -639,6 +682,10 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
         if (json_get_number(val, "decay",   &n) == 0) in->decay_ms   = clampf((float)n, 0.0f, 500.0f);
         if (json_get_number(val, "sustain", &n) == 0) in->sustain    = clampf((float)n, 0.0f, 1.0f);
         if (json_get_number(val, "release", &n) == 0) in->release_ms = clampf((float)n, 0.0f, 500.0f);
+        /* Absent in v1 and v2 blobs, where the gate always ran the whole step;
+         * 1.0 is that behaviour, so an old patch is unchanged. */
+        in->hold = 1.0f;
+        if (json_get_number(val, "hold", &n) == 0) in->hold = clampf((float)n, 0.0f, 1.0f);
         /*
          * THREE SPELLINGS OF ONE VALUE, AND THE OLD PAIR MULTIPLIES.
          *
@@ -718,6 +765,7 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
     if (strcmp(key, "decay") == 0)   return snprintf(buf, buf_len, "%.1f", in->decay_ms);
     if (strcmp(key, "sustain") == 0) return snprintf(buf, buf_len, "%.2f", in->sustain);
     if (strcmp(key, "release") == 0) return snprintf(buf, buf_len, "%.1f", in->release_ms);
+    if (strcmp(key, "hold") == 0)    return snprintf(buf, buf_len, "%.2f", in->hold);
     if (strcmp(key, "amount") == 0)  return snprintf(buf, buf_len, "%.2f", in->amount);
     if (strcmp(key, "stopped") == 0) return snprintf(buf, buf_len, "%s",
                                         in->stopped_mode == TG_STOPPED_FREE ? "Free" : "Open");
@@ -790,10 +838,10 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         int n = snprintf(buf, buf_len,
             "{\"sv\":%d,\"slot\":%d,\"rate\":\"%s\","
             "\"attack\":%.2f,\"decay\":%.2f,\"sustain\":%.3f,\"release\":%.2f,"
-            "\"amount\":%.3f,\"stopped\":%d",
+            "\"hold\":%.3f,\"amount\":%.3f,\"stopped\":%d",
             TG_STATE_VERSION, in->slot, tg_rates[in->rate_idx].label,
             in->attack_ms, in->decay_ms, in->sustain, in->release_ms,
-            in->amount, in->stopped_mode);
+            in->hold, in->amount, in->stopped_mode);
         for (int s = 0; s < TG_SLOTS && n > 0 && n < buf_len; s++) {
             n += snprintf(buf + n, buf_len - n, ",\"p%d\":\"%X:%X:%d:",
                           s, in->pat[s].steps, in->pat[s].ties, in->pat[s].length);
@@ -915,6 +963,10 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
          * calling them different things (Level, Depth, Mix) is what made three
          * controls out of one. Shown 0-100%: `unit: "%"` with max 1 is what
          * makes the formatter scale it. */
+        /* Gate length. Sustain is a LEVEL and has none; this is the duration
+         * control, expressed as a share of the step so it follows the Rate. */
+        "{\"key\":\"hold\",\"name\":\"Gate\",\"short_name\":\"Gate\",\"type\":\"float\","
+          "\"min\":0.05,\"max\":1,\"default\":1,\"step\":0.01,\"unit\":\"%\"},"
         "{\"key\":\"amount\",\"name\":\"Amount\",\"short_name\":\"Amnt\",\"type\":\"float\",\"min\":0,\"max\":1,"
           "\"default\":1,\"step\":0.01,\"unit\":\"%\"},"
         "{\"key\":\"pattern\",\"name\":\"Pat\",\"type\":\"string\",\"access\":\"read\"},"

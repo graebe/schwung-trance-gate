@@ -42,6 +42,67 @@ import {
  * ours is stripped back off on the way through. */
 const PREFIX = "tg";
 
+/* How far outside the ring the cursor arc sits, in pixels. One would touch the
+ * segments and read as part of them. */
+const CURSOR_GAP = 2;
+
+/* ------------------------------------------------------------------ pads --
+ *
+ * Note 68 is the BOTTOM-LEFT pad and they run left-to-right then upward, so
+ * 92..99 is the top row. Steps do NOT follow that order -- see stepToNote.
+ */
+const PAD_FIRST = 68;
+const PAD_COUNT = 32;
+const PAD_COLS = 8;
+
+/*
+ * STEP ORDER IS READING ORDER; THE HARDWARE'S IS NOT.
+ *
+ * Move numbers its pads from the BOTTOM-left upward -- note 68 is the bottom
+ * row's first pad and 92..99 is the top row. A step sequencer reads the other
+ * way: step 1 belongs in the top-left corner, then along the top row, then the
+ * row beneath it.
+ *
+ * Mapping here rather than anywhere else is deliberate. The pattern, the ring
+ * and the knobs all speak in STEP indices; only these two functions know the
+ * note numbers, so nothing downstream has to remember which way up the grid
+ * is. It also means a 16-step pattern lights the top two rows, which is where
+ * the eye starts.
+ */
+function stepToNote(step) {
+    const row = (step / PAD_COLS) | 0;          /* 0 = top */
+    const col = step % PAD_COLS;
+    return PAD_FIRST + (3 - row) * PAD_COLS + col;
+}
+
+function noteToStep(note) {
+    const idx = note - PAD_FIRST;
+    if (idx < 0 || idx >= PAD_COUNT) return -1;
+    const rowUp = (idx / PAD_COLS) | 0;         /* 0 = bottom */
+    const col = idx % PAD_COLS;
+    return (3 - rowUp) * PAD_COLS + col;
+}
+
+/* LEDs written per frame during the first paint. Eight is the house figure;
+ * 32 pads is four frames. */
+const LED_PER_FRAME = 8;
+
+/*
+ * MOVE STILL OWNS THESE LEDS.
+ *
+ * `pad_block` suppresses pad INPUT only. The shim strips Move's own LED
+ * packets in overtake mode, and a ui_chain.js component is not overtake -- so
+ * Move repaints pads on its own events (a track switch, clip playback, a view
+ * change) right over ours, and setLED's cache then claims colours the hardware
+ * stopped showing. Painting only on change can therefore never recover.
+ *
+ * One forced pad per frame walks the whole grid about twice a second, which
+ * costs one packet a frame and is the only thing that heals a clobber.
+ */
+let ledPaintCursor = 0;      /* progressive first paint */
+let ledHealCursor = 0;       /* rolling forced repaint */
+let padsPainted = false;
+
 /*
  * The hierarchy the DSP deliberately will not serve.
  *
@@ -72,7 +133,22 @@ const HIERARCHY = JSON.stringify({
         root: {
             name: "Gate",
             children: null,
-            knobs: ["cursor", "step", "sdepth", "random", "length", "rate"],
+            /*
+             * NO `cursor` AND NO `step` KNOB.
+             *
+             * The pads do both, and better: a pad IS the step, so selecting
+             * one and toggling it is a single press on the thing itself
+             * rather than two encoders spent walking an index. Leaving the
+             * knobs in as a second route meant four of the six were spent on
+             * what the grid already does, and the two surfaces could disagree
+             * for a rotation at a time.
+             *
+             * Both keys keep their chain_params metadata -- the pads write
+             * them, and the ring reads the cursor back out of `ui` -- they
+             * simply have no cell. `step_amount` leads because it is what you
+             * reach for straight after choosing a pad.
+             */
+            knobs: ["step_amount", "random", "length", "rate"],
             params: ["gate", { level: "settings", label: "Settings" }]
         },
         settings: {
@@ -83,9 +159,9 @@ const HIERARCHY = JSON.stringify({
              * dropped whole and in silence, and the envelope graphic is the
              * point of grouping them. */
             knobs: ["attack", "decay", "sustain", "release",
-                    "amount", "slot", "stopped"],
+                    "hold", "amount", "slot", "stopped"],
             params: ["attack", "decay", "sustain", "release",
-                     "amount", "slot", "stopped"]
+                     "hold", "amount", "slot", "stopped"]
         }
     }
 });
@@ -116,6 +192,22 @@ function shiftHeld() {
  * Exactly the trick the DSP uses against get_beat_position()'s block
  * interpolation, for the same reason. */
 let anchor = null;   /* { phase, msStep, length, atMs, running } */
+
+/*
+ * THE CURSOR THE DEPENDENT KNOBS WERE LAST READ FOR.
+ *
+ * `step` and `step_amount` are not independent parameters -- they are VIEWS on
+ * whichever step the cursor is over, and the host has no way to know that. It
+ * refreshes them on its own staggered rotation, so for up to a full rotation
+ * after the cursor moves they still show the PREVIOUS step's gate and amount,
+ * while the ring has already moved its bracket. The two surfaces disagree
+ * about which step you are editing, which is exactly what it looks like: an
+ * off-by-one that is really a staleness.
+ *
+ * Worse than cosmetic: turn `step` during that window and the value shown is
+ * the old step's, so the write lands somewhere the screen never described.
+ */
+let valuedCursor = -1;
 
 function movy() {
     return {
@@ -391,16 +483,16 @@ function paintPads(u) {
     if (!padsPainted) {
         const end = Math.min(ledPaintCursor + LED_PER_FRAME, PAD_COUNT);
         for (let i = ledPaintCursor; i < end; i++) {
-            setLED(PAD_FIRST + i, padColour(u, i));
+            setLED(stepToNote(i), padColour(u, i));
         }
         ledPaintCursor = end;
         if (ledPaintCursor >= PAD_COUNT) padsPainted = true;
         return;
     }
 
-    for (let i = 0; i < PAD_COUNT; i++) setLED(PAD_FIRST + i, padColour(u, i));
+    for (let i = 0; i < PAD_COUNT; i++) setLED(stepToNote(i), padColour(u, i));
 
-    setLED(PAD_FIRST + ledHealCursor, padColour(u, ledHealCursor), true);
+    setLED(stepToNote(ledHealCursor), padColour(u, ledHealCursor), true);
     ledHealCursor = (ledHealCursor + 1) % PAD_COUNT;
 }
 
@@ -414,8 +506,8 @@ function paintPads(u) {
  */
 function onPadPress(note) {
     const u = uiCache.parsed;
-    const i = note - PAD_FIRST;
-    if (i < 0 || i >= PAD_COUNT) return false;
+    const i = noteToStep(note);
+    if (i < 0) return false;
     /* Past the end of the pattern: dark, and does nothing. */
     if (u && i >= u.length) return true;
 
@@ -424,21 +516,58 @@ function onPadPress(note) {
     /* 1-based on the wire: the cursor is numbered the way the ring is. */
     host_module_set_param("cursor", String(i + 1));
 
-    /* Off -> On -> (whatever it was). A tie is reachable from the knob; a pad
-     * is the fast gesture and a three-way toggle under one finger would make
-     * the fast gesture the confusing one. */
-    const wasOn = u ? ((u.steps >> i) & 1) : 0;
-    host_module_set_param("step", wasOn ? "Off" : "On");
+    /*
+     * PLAIN PRESS IS ON/OFF; SHIFT IS THE TIE.
+     *
+     * A three-way cycle under one finger would make the frequent gesture --
+     * drawing a pattern -- the confusing one, and you would tap through Tie
+     * every time you wanted to clear a step. Shift is the modifier Move uses
+     * for "the other meaning" everywhere else, and it keeps the tie reachable
+     * now that the `step` knob is gone: without it, removing that knob would
+     * have quietly deleted the feature.
+     *
+     * Shift only means anything on a step that SOUNDS -- a tie is a hold into
+     * the next step and an off step has nothing to hold -- so on an off step
+     * it turns it on, which is what you wanted anyway.
+     */
+    const wasOn  = u ? ((u.steps >> i) & 1) : 0;
+    const wasTie = u ? ((u.ties  >> i) & 1) : 0;
 
-    /* The next read will bring the truth; moving the cache now keeps the ring
-     * and the LEDs in step with the finger rather than with the rotation. */
+    let next;
+    if (shiftHeld()) next = wasOn ? (wasTie ? "On" : "Tie") : "On";
+    else             next = wasOn ? "Off" : "On";
+    host_module_set_param("step", next);
+
+    /* The next read brings the truth; moving the cache now keeps the ring and
+     * the LEDs with the finger rather than with the rotation. */
     if (u) {
-        if (wasOn) { u.steps &= ~(1 << i); u.ties &= ~(1 << i); }
-        else u.steps |= (1 << i);
+        const bit = 1 << i;
+        if (next === "Off")      { u.steps &= ~bit; u.ties &= ~bit; }
+        else if (next === "On")  { u.steps |=  bit; u.ties &= ~bit; }
+        else                     { u.steps |=  bit; u.ties |=  bit; }
         u.cursor = i;
     }
     needsRedraw = true;
     return true;
+}
+
+/*
+ * Repaint whatever Move believes it is showing.
+ *
+ * Outside overtake the shim's snapshot tracks MOVE's writes rather than ours,
+ * so it is exactly the state to hand back. A note Move never lit has no cached
+ * colour, and dark is the truthful answer for it.
+ */
+function restoreMovePads() {
+    const snap = (typeof shadow_get_pad_led_snapshot === "function")
+        ? shadow_get_pad_led_snapshot() : null;
+    invalidateLedCache();
+    for (let note = PAD_FIRST; note < PAD_FIRST + PAD_COUNT; note++) {
+        const c = snap && typeof snap[note] === "number" ? snap[note] : 0;
+        setLED(note, c, true);
+    }
+    padsPainted = false;
+    ledPaintCursor = 0;
 }
 
 /* ------------------------------------------------------------- lifecycle -- */
@@ -509,6 +638,7 @@ function landOnRing() {
 function init() {
     anchor = null;
     landed = false;
+    valuedCursor = -1;
     uiCache = { raw: null, parsed: null };
     padsPainted = false;
     ledPaintCursor = 0;
@@ -536,7 +666,21 @@ function tick() {
 
     /* Driven from the same parsed answer the ring draws, so the two surfaces
      * cannot disagree. */
-    paintPads(uiCache.parsed);
+    const u = uiCache.parsed;
+    paintPads(u);
+
+    /*
+     * The cursor moved, so re-read what depends on it. revalue() flushes any
+     * due write, drops the value cache and re-warms the page -- the keys come
+     * back for the step the ring is actually pointing at.
+     *
+     * Gated on a real change: it is a whole-page refresh, and running it every
+     * frame would spend the read budget several times over.
+     */
+    if (u && u.cursor !== valuedCursor) {
+        valuedCursor = u.cursor;
+        ctl.revalue();
+    }
 
     /* The ring animates, so it cannot wait for an input to ask for a repaint.
      * Everything else is cheap enough that redrawing with it costs nothing we
@@ -604,8 +748,32 @@ function onMidiMessageInternal(data) {
  * answers "exit", so anything else here would be a second, disagreeing copy of
  * that rule. */
 function handleBack() {
+    /*
+     * PUT MOVE'S PADS BACK.
+     *
+     * Move only writes a pad LED when its value CHANGES, so once we have
+     * painted over the grid it has no reason to write anything and our
+     * colours stay after we are gone.
+     *
+     * The host reconciles this on the ownership edge, which covers every exit
+     * -- a Track tap, Menu, Shift+Vol, co-run -- and is the real fix. This
+     * covers the common one without waiting for a host deploy, and costs
+     * nothing when the host does it too: the same colours, written twice.
+     */
+    restoreMovePads();
     return false;
 }
+
+/* Pure helpers, exported for tests. The host never looks at this. */
+globalThis.chain_ui_test = {
+    parseUi,
+    stepToNote,
+    noteToStep,
+    /* Which ring segment the cursor bracket is drawn over, given a `ui`
+     * string. Must equal the cell's value minus one, always. */
+    cursorSegment: (raw) => { const u = parseUi(raw); return u ? u.cursor : -1; },
+    centreLabel: (raw) => { const u = parseUi(raw); return u ? String(u.cursor + 1) : "?"; },
+};
 
 globalThis.chain_ui = {
     init,
