@@ -83,12 +83,12 @@ Per-step depth needs a ninth. Ways out, cheapest first:
 
 ## Known open, already flagged
 
-- [ ] **TWO host changes are not on the device**, and two of the three items
+- [x] ~~TWO host changes are not on the device~~ — committed and pushed to graebe/schwung; still need `install.sh local` to reach the device, and two of the three items
       above do nothing without them: the canvas-page ordering (so the ring is
       page 1 rather than merely where the cursor lands) and the `fitDev`
       measurement fix. Deploying means `install.sh local`, which rebuilds and
       restarts the whole host.
-- [ ] **The `fitDev` host fix is not on the device.** `render_page_movy.mjs`
+- [ ] **Still not DEPLOYED** (committed, but `install.sh local` restarts the host) — the `fitDev` fix `render_page_movy.mjs`
       measured cell values in Tamzen while drawing them in font4x5, so anything
       ≥3 digits lost its last character ("100 ms" → "100 m"). Fixed on the
       schwung branch, 41 fleet baseline pages updated, all render tests green —
@@ -97,15 +97,15 @@ Per-step depth needs a ninth. Ways out, cheapest first:
 - [x] ~~Depth, Mix, Slot and Stop have no cells~~ — back on the Settings page. They kept their metadata and
       still travel in presets, but are unreachable from the grid — the cost of
       collapsing to one settings page. Swap any back in on request.
-- [ ] **"1000 ms" still will not fit** (32px against a 30px cell) even after the
+- [x] ~~"1000 ms" still will not fit~~ — decay/release capped at 500 ms. (32px against a 30px cell) even after the
       host fix, which is why decay and release are capped at 500 ms.
-- [ ] **Pads do nothing yet.** `host_pad_block(1)` is called every frame so they
+- [x] ~~Pads do nothing yet~~ — press toggles + selects, green/red LEDs, healing repaint. `host_pad_block(1)` is called every frame so they
       are silent, but nothing acts on a press. Original plan: pad = toggle step,
       Shift+pad = tie, LEDs mirroring the pattern. The three-state `step` knob
       has since covered the same ground from the encoders, so this is now a
       convenience rather than the primary editor — decide whether it still earns
       its complexity.
-- [ ] **Nothing is committed.** Both worktrees are dirty; `feature/trance-gate`
+- [x] ~~Nothing is committed~~ — both repos pushed to graebe. Both worktrees are dirty; `feature/trance-gate`
       in each repo has no commits beyond the empty root in the module repo.
 - [ ] **No release workflow.** `.github/workflows/` is empty; `release.json` and
       `src/module.json` must agree on the version, and the catalog entry on the
@@ -125,3 +125,43 @@ Per-step depth needs a ninth. Ways out, cheapest first:
   clipped frame, so picture and text cannot collide.
 - Playhead animates at frame rate by interpolating between `ui` reads using
   `ms_step`.
+
+
+---
+
+## Phase 2 review (2026-09-19) — closed
+
+Eight bugs found and fixed; see the commit messages for the reasoning.
+
+- [x] **B1** `char sv[40]` vs an 85-char state field — per-step amounts above
+      step ~14 were silently lost on every save. The round-trip test passed by
+      luck (checked step 4). Buffer is derived from the format now, there is a
+      `_Static_assert` against the bus-insert 1024-byte cap, and the test walks
+      all 32 with distinct values — it reports "first wrong step: 15" against
+      the old buffer.
+- [x] **B2** cursor not re-clamped on a slot change
+- [x] **B3** `landOnRing()` ran once at init, so a contract that resolved late
+      left you on the settings page — the intermittent "wrong page" report
+- [x] **B4** free-run phase grew without bound
+- [x] **B5** pad presses swallowed by `decodeInput`
+- [x] **B6** Shift read from CC 49, which the shim never forwards — it had
+      never worked in this module
+- [x] **B7** `ui_hierarchy` refused with `-1` instead of served as `""`,
+      making the entry gate hold
+- [x] **B8** stale tests after the amount collapse
+- [x] **P1** `parseUi` allocating every frame
+- [x] **P3** envelope recursion flattened
+- [x] **P4** `help.json` shipped — with `children` as the top key, the thing
+      that silently discards twelve fleet modules
+- [ ] **P2** `calloc`/`free` on the SPI callback. Every fleet module does this
+      and the v2 API offers no alternative; a static instance pool would remove
+      it. Left open deliberately.
+
+### Still open
+
+- [ ] Deploy the host changes (`install.sh local` — rebuilds and restarts the
+      whole host). Until then the ring is page 1 only because the cursor is
+      moved there, and 3-digit ms values still truncate.
+- [ ] Release workflow + first tag. `release.json` and `src/module.json` must
+      agree on the version; the catalog entry already points at
+      `graebe/schwung-trance-gate`.
