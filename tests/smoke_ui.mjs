@@ -27,6 +27,8 @@ const src = readFileSync('src/ui_chain.js', 'utf8')
 writeFileSync(resolve(OUT, 'ui_chain.mjs'), src);
 
 let sent = 0;
+let uiLength = 16;              /* what the DSP would report for `length` */
+const litPads = Object.create(null);
 const params = Object.create(null);
 
 for (const n of ['clear_screen', 'fill_rect', 'draw_rect', 'print', 'set_pixel',
@@ -39,13 +41,17 @@ globalThis.tts_get_enabled = () => false;
 globalThis.param_view_get_mode = () => 1;
 globalThis.shadow_get_shift_held = () => 0;
 globalThis.shadow_component_trailing_menus = () => [];
-globalThis.move_midi_internal_send = () => { sent++; return true; };
+globalThis.move_midi_internal_send = (pkt) => {
+    sent++;
+    if (pkt && pkt.length === 4) litPads[pkt[2]] = pkt[3];   /* note -> colour */
+    return true;
+};
 globalThis.host_module_set_param = (k, v) => { params[k] = String(v); return true; };
 globalThis.host_module_get_param = (k) => {
     if (k in params) return params[k];
     /* Enough of the real contract to let the controller plan pages. */
     if (k === 'chain_params') return readFileSync(process.env.TG_PARAMS, 'utf8');
-    if (k === 'ui')      return '5555:0:16:3.250:125.00:1:2:' + 'FF'.repeat(16);
+    if (k === 'ui')      return `FFFFFFFF:0:${uiLength}:3.250:125.00:1:2:` + 'FF'.repeat(uiLength);
     if (k === 'state')   return '{"sv":3}';
     if (k === 'name')    return 'TRANCE GATE';
     return null;                       /* a read that did not answer */
@@ -170,6 +176,32 @@ step('ring marker and cell value agree (0 vs 1 based)', () => {
         if (seg !== oneBased - 1) throw new Error(`cursor ${oneBased}: marker on segment ${seg}`);
         if (label !== String(oneBased)) throw new Error(`cursor ${oneBased}: label "${label}"`);
     }
+});
+
+/*
+ * THE PADS FOLLOW THE PATTERN FROM EVERY PAGE.
+ *
+ * The cache the painter reads is filled by the ring's DRAWER, and `ui` is an
+ * extra_key of the canvas page -- so off that page nothing asked for it and
+ * the grid kept showing the previous length. Shortening a 32-step pattern left
+ * the pads that should have gone dark still lit.
+ */
+step('shortening the pattern darkens the freed pads', () => {
+    uiLength = 32;
+    for (let i = 0; i < 40; i++) ui.tick();          /* let it settle at 32 */
+    const note = T.stepToNote(31);                   /* last step, bottom-right */
+    if (!litPads[note]) throw new Error('step 32 was never lit at length 32');
+
+    uiLength = 8;                                    /* as the Len knob would */
+    for (let i = 0; i < 40; i++) ui.tick();
+    if (litPads[note] !== 0)
+        throw new Error(`step 32 still lit (colour ${litPads[note]}) after length 8`);
+});
+step('and growing it lights them again', () => {
+    uiLength = 32;
+    for (let i = 0; i < 40; i++) ui.tick();
+    const note = T.stepToNote(31);
+    if (litPads[note] === 0) throw new Error('step 32 stayed dark after growing to 32');
 });
 
 rmSync(OUT, { recursive: true, force: true });

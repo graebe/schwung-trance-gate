@@ -450,6 +450,35 @@ function drawRing(ctx, o) {
 
 /* --------------------------------------------------------------- pad LEDs -- */
 
+/*
+ * KEEP THE PATTERN FRESH EVEN WHEN THE RING IS NOT ON SCREEN.
+ *
+ * The cache above is filled by drawRing, as a side effect of drawing -- and
+ * `ui` is an extra_key of the CANVAS page, so on any other page the controller
+ * does not even ask for it. The pads, though, are lit the whole time the
+ * module is up. So editing Len or Rate from the cells page left the grid
+ * showing the previous length: shorten a 32-step pattern and the pads that
+ * should have gone dark stayed lit, because nothing had told the painter.
+ *
+ * One read, throttled, and only when the ring is not already doing it. At
+ * ~7Hz that is a few percent of the read budget, which is the right price for
+ * a surface that is always visible -- and it is skipped entirely on the page
+ * where the ring keeps the cache current for free.
+ */
+const UI_READ_TICKS = 8;
+let uiReadTick = 0;
+
+function refreshUiOffRing() {
+    if (ctl && ctl.onCanvasPage && ctl.onCanvasPage()) return;   /* drawRing has it */
+    if ((++uiReadTick % UI_READ_TICKS) !== 0) return;
+    if (typeof host_module_get_param !== "function") return;
+    const raw = host_module_get_param("ui");
+    /* null is a read that did not complete and "" is a key that produced
+     * nothing -- neither is news about the pattern, so keep the last answer
+     * rather than blanking the grid on a timeout. */
+    if (raw !== null && raw !== undefined && raw !== "") parseUiCached(raw);
+}
+
 /* What colour step `i` should be, given the current pattern. */
 function padColour(u, i) {
     if (!u || i >= u.length) return Black;          /* past the pattern: dark */
@@ -640,6 +669,7 @@ function init() {
     landed = false;
     valuedCursor = -1;
     uiCache = { raw: null, parsed: null };
+    uiReadTick = 0;
     padsPainted = false;
     ledPaintCursor = 0;
     ledHealCursor = 0;
@@ -665,7 +695,8 @@ function tick() {
     landOnRing();            /* no-op once it has succeeded */
 
     /* Driven from the same parsed answer the ring draws, so the two surfaces
-     * cannot disagree. */
+     * cannot disagree -- and kept current off the ring page too. */
+    refreshUiOffRing();
     const u = uiCache.parsed;
     paintPads(u);
 
