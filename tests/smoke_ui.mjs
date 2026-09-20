@@ -30,6 +30,7 @@ let sent = 0;
 let uiLength = 16;              /* what the DSP would report for `length` */
 let uiPhase = 3.250;            /* where the playhead sits */
 let uiMoving = 1;               /* the `advancing` field, not "transport on" */
+let uiWithhold = 0;             /* reads of `ui` still to answer with null */
 const litPads = Object.create(null);
 const params = Object.create(null);
 
@@ -40,7 +41,11 @@ for (const n of ['clear_screen', 'fill_rect', 'draw_rect', 'print', 'set_pixel',
                  'host_pad_block', 'shadow_component_run_action']) {
     globalThis[n] = () => 0;
 }
-globalThis.clear_screen = () => { clearCount++; return 0; };
+/* What the LAST frame put on screen, so a test can assert on the picture the
+ * user is actually looking at rather than on a variable near it. */
+let frameText = [];
+globalThis.clear_screen = () => { clearCount++; frameText = []; return 0; };
+globalThis.print = (x, y, str) => { frameText.push(String(str)); return 0; };
 globalThis.text_width = (s) => String(s).length * 6;
 globalThis.tts_get_enabled = () => false;
 globalThis.param_view_get_mode = () => 1;
@@ -56,7 +61,14 @@ globalThis.host_module_get_param = (k) => {
     if (k in params) return params[k];
     /* Enough of the real contract to let the controller plan pages. */
     if (k === 'chain_params') { chainParamReads++; return readFileSync(process.env.TG_PARAMS, 'utf8'); }
-    if (k === 'ui')      return `FFFFFFFF:0:${uiLength}:${uiPhase.toFixed(3)}:125.00:${uiMoving}:2:` + 'FF'.repeat(uiLength);
+    if (k === 'ui') {
+        /* THE DEVICE ANSWERS ONE KEY PER TICK. The rotation is
+         * keys + 1 + extraKeys = 10 stops, so `ui` lands around tick 9 -- long
+         * after the first frame. This harness used to answer everything
+         * instantly, which is precisely why it could not see the deadlock. */
+        if (uiWithhold > 0) { uiWithhold--; return null; }
+        return `FFFFFFFF:0:${uiLength}:${uiPhase.toFixed(3)}:125.00:${uiMoving}:2:` + 'FF'.repeat(uiLength);
+    }
     if (k === 'state')   return '{"sv":3}';
     if (k === 'name')    return 'TRANCE GATE';
     return null;                       /* a read that did not answer */
@@ -144,6 +156,7 @@ step('pad LEDs were actually painted', () => {
  * pinned by the corners rather than by restating the formula.
  */
 const T = globalThis.chain_ui_test;
+const ctlPage = () => T.state() && T.state().pages ? T.state().pages[T.state().pageIndex] : null;
 step('step 1 is the TOP-LEFT pad', () => {
     if (T.stepToNote(0) !== 92) throw new Error(`step 0 -> note ${T.stepToNote(0)}, expected 92`);
 });
@@ -535,6 +548,87 @@ step('nothing drawn outside the frame', () => {
         uiMoving = 1; uiPhase = 3.250; uiLength = 16;
         ticks(4);
     }
+}
+
+/*
+ * A COLD OPEN MUST REACH THE RING ON ITS OWN.
+ *
+ * drawRing prints "..." when it has no `ui` reading -- correct, a read that
+ * did not answer must never become a picture. The bug was that it could get
+ * STUCK there: `uiCache` was filled as a side effect of DRAWING, and the
+ * redraw gate was derived from `uiCache`. Drawing was the only writer of the
+ * state that decided whether to draw.
+ *
+ * First frame: needsRedraw, `ui` not yet read, dots, gate closes. The
+ * rotation delivers `ui` eight ticks later and nothing ever looks at it.
+ * Permanent -- until any input, which is why it read as "the first time".
+ *
+ * This is the whole reason the harness now withholds a read.
+ */
+{
+    const ticks = (n) => { for (let i = 0; i < n; i++) ui.tick(); };
+
+    step('a cold open leaves the dots with NO input at all', () => {
+        /* Counted in READS, not ticks: the rotation reaches `ui` once every
+         * ten ticks, so two withheld reads puts the first real answer at
+         * about tick 29 -- well after the first frame, which is the point. */
+        uiWithhold = 2;
+        uiMoving = 1; uiPhase = 3.25; uiLength = 16;
+        ui.init();                /* cold */
+        clearCount = 0;
+        ticks(60);                /* not one input in the whole window */
+
+        if (!T.uiRaw()) throw new Error('the ui reading never reached the cache');
+        if (frameText.indexOf('...') >= 0)
+            throw new Error('the last frame is still the loading dots');
+        if (clearCount === 0) throw new Error('nothing was ever drawn');
+    });
+
+    step('...and it did not fall back to drawing every frame', () => {
+        if (clearCount > 40) throw new Error(`${clearCount} redraws in 60 ticks`);
+    });
+
+    /*
+     * DRAWING MUST BE SIDE-EFFECT FREE, which is the property that makes the
+     * gate sound. If a draw can still change what the gate reads, the
+     * circularity is back and only its symptom was patched.
+     */
+    step('drawing the ring changes no state the gate reads', () => {
+        const before = T.uiRaw();
+        const r1 = renderRing("1");
+        const after = T.uiRaw();
+        if (after !== before) throw new Error('drawRing wrote to uiCache');
+        if (!r1) throw new Error('the ring did not draw');
+    });
+
+    /*
+     * The other half of the same shape: the entry warm and revalue() refill
+     * the controller's values ASYNCHRONOUSLY. They were repainted only
+     * because a pad press also happens to start the input tail.
+     */
+    step('a value arriving with no input repaints', () => {
+        const realNow = Date.now;
+        let NOW = realNow() + 10_000_000;
+        Date.now = () => NOW;
+        try {
+            uiMoving = 0;                        /* park the playhead */
+            NOW += 5000; ticks(8); NOW += 5000; ticks(8);
+            clearCount = 0;
+            ticks(6);
+            if (clearCount !== 0) throw new Error('not settled: ' + clearCount);
+
+            /* as the rotation would, with nobody touching anything */
+            const page = ctlPage();
+            if (!page) throw new Error('no page');
+            globalThis.chain_ui_test.state().values[page.keys[0]] = "0.4242";
+            ticks(6);
+            if (clearCount === 0) throw new Error('a late value repainted nothing');
+        } finally {
+            Date.now = realNow;
+            uiMoving = 1; uiPhase = 3.250; uiLength = 16;
+            ticks(4);
+        }
+    });
 }
 
 /*

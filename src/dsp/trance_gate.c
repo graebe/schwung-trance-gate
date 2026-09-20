@@ -442,6 +442,11 @@ static void v2_process_block(void *instance, int16_t *audio_inout, int frames) {
      * point -- only the per-sample gain work is skipped -- so turning Amount
      * back up lands on the step the pattern would have reached, not on the
      * one it was left at.
+     *
+     * The ENVELOPE is left frozen mid-stage, which is safe only because
+     * attack now ramps from wherever env is: under the old zero-restart this
+     * would have resumed with a full-scale step, i.e. the same click this
+     * path looks like it could not possibly cause.
      */
     if (in->amount <= 0.0f) {
         in->step_pos += inc * (double)frames;

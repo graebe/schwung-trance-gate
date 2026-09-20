@@ -176,6 +176,7 @@ const ANIM_TAIL_MS = 1600;
 let lastInputMs = -1e9;
 let drawnHead = -2;          /* -2 so the first frame always differs */
 let drawnUiRaw = null;
+let drawnStamp = null;
 let paintedHead = -2;
 let paintedUiRaw = null;
 
@@ -368,9 +369,22 @@ function drawRing(ctx, o) {
     if (w < 24 || h < 16) return;
 
     const vals = (o && o.values) || {};
-    const u = parseUiCached(vals.ui);
-
-    anchorFrom(u, vals.ui, o.nowMs);
+    /*
+     * READ, NEVER FILL. This used to call parseUiCached and anchorFrom here,
+     * so the cache and the playhead clock were side effects of DRAWING -- and
+     * the redraw gate is derived from that same cache, so drawing was the only
+     * writer of the state that decides whether to draw.
+     *
+     * On a cold open that is a deadlock, not a race: the first frame draws
+     * before the rotation has reached `ui`, prints the dots, and closes the
+     * gate against a cache that nothing else fills. The value lands eight
+     * ticks later and is never looked at. It reached the user as "the trance
+     * gate doesn't load", and any input cleared it, which is what made it look
+     * like a first-open quirk.
+     *
+     * refreshUi() owns both now, from tick(), on every page.
+     */
+    const u = uiCache.parsed;
 
     /* A read that has not answered must not become a picture: say so and stop,
      * rather than draw a ring of a guessed length. */
@@ -573,20 +587,33 @@ function drawAllAmountMeter(ctx, raw, w, h) {
 const UI_READ_TICKS = 8;
 let uiReadTick = 0;
 
-function refreshUiOffRing() {
-    if (ctl && ctl.onCanvasPage && ctl.onCanvasPage()) return;   /* drawRing has it */
-    if ((++uiReadTick % UI_READ_TICKS) !== 0) return;
-    if (typeof host_module_get_param !== "function") return;
-    const raw = host_module_get_param("ui");
+function refreshUi() {
+    let raw;
+    if (ctl && ctl.onCanvasPage && ctl.onCanvasPage()) {
+        /*
+         * FREE ON THE RING PAGE. `ui` is an extra_key of the canvas page, so
+         * the controller's rotation has already paid for this read -- taking
+         * it from the value cache costs nothing and is the same string
+         * drawRing used to be handed.
+         *
+         * Doing it HERE rather than in the drawer is the whole fix: the cache
+         * fills whether or not a frame is painted, so "we have no data" can
+         * never be a state the gate settles into.
+         */
+        const st = ctl.state;
+        raw = st && st.values ? st.values.ui : undefined;
+    } else {
+        if ((++uiReadTick % UI_READ_TICKS) !== 0) return;
+        if (typeof host_module_get_param !== "function") return;
+        raw = host_module_get_param("ui");
+    }
     /* null is a read that did not complete and "" is a key that produced
      * nothing -- neither is news about the pattern, so keep the last answer
      * rather than blanking the grid on a timeout. */
     if (raw === null || raw === undefined || raw === "") return;
     const u = parseUiCached(raw);
-    /* The SAME anchor the ring seeds. Without this the playhead is frozen on
-     * every page but the ring -- this read is the only one that happens there.
-     * Its ~7Hz is well under a fast step rate, which is exactly what livePhase
-     * exists to cover: it extrapolates at frame rate between anchors. */
+    /* The playhead's clock, seeded wherever the reading came from, so the ring
+     * and the pads are one playhead on every page. */
     anchorFrom(u, raw, Date.now());
 }
 
@@ -879,6 +906,17 @@ function init() {
     valuedCursor = -1;
     uiCache = { raw: null, parsed: null };
     uiReadTick = 0;
+    /* The redraw gate is state ABOUT a previous session's screen. Left behind,
+     * re-entry can inherit a tail that has not expired or a stamp that happens
+     * to match, and the first frame of the new session is decided by the last
+     * frame of the old one. */
+    drawnHead = -2;
+    drawnUiRaw = null;
+    drawnStamp = null;
+    paintedHead = -2;
+    paintedUiRaw = null;
+    lastInputMs = -1e9;
+    contractTick = 0;
     padsPainted = false;
     ledPaintCursor = 0;
     ledHealCursor = 0;
@@ -894,6 +932,24 @@ function init() {
 const CONTRACT_TICKS = 32;
 let contractTick = 0;
 
+/*
+ * WHY THIS IS SAFE, WRITTEN DOWN, because the library says the opposite.
+ *
+ * page_controller's own export comment reads "the host redraws every tick
+ * while it is up, so a custom page can animate" -- and this gate does not.
+ * That is deliberate: the only self-moving thing on this page is the ring's
+ * playhead, which advances at the STEP rate (eight times a second at 1/16),
+ * so a 44 Hz repaint was drawing the same picture forty-odd times for every
+ * time it changed.
+ *
+ * What makes it sound is that EVERY input to the picture is a term below --
+ * an input, the tail of what that input animates, the playhead, the pattern,
+ * and the controller's own values. Miss one and the screen freezes with no
+ * symptom pointing here, which is exactly what happened when `uiCache` was
+ * filled by the drawer: the gate was reading a variable that only drawing
+ * wrote. Add a term rather than widen the tail if something else ever
+ * animates.
+ */
 function shouldRedraw(head) {
     if (needsRedraw) return true;                              /* an input */
     /*
@@ -906,9 +962,37 @@ function shouldRedraw(head) {
      */
     const since = Date.now() - lastInputMs;
     if (since >= 0 && since < ANIM_TAIL_MS) return true;       /* its animation */
+    /*
+     * NO DATA IS NEVER A RESTING STATE. Whatever else goes wrong upstream, a
+     * frame that says "..." must not be one the gate is content with -- that
+     * is the shape the cold-open deadlock took, and a floor here means the
+     * worst case is a few wasted frames rather than a module that never loads.
+     */
+    if (!uiCache.parsed) return true;                          /* still waiting */
     if (head !== drawnHead) return true;                       /* the playhead */
     if (uiCache.raw !== drawnUiRaw) return true;               /* the pattern */
+    /*
+     * A VALUE CAN ARRIVE WITH NO INPUT. The entry warm and revalue() refill
+     * the controller's cache over the following ticks, one key each, and a
+     * `live` key or another writer can change one at any time. Those repainted
+     * only because a pad press also happens to start the input tail -- a
+     * coincidence, not a design, and the same assumption that broke the ring.
+     *
+     * Eight property reads and a concat, against a 1.68 ms page render.
+     */
+    const stamp = valuesStamp();
+    if (stamp !== drawnStamp) return true;                     /* a late value */
     return false;
+}
+
+/* The current page's values, cheaply comparable. */
+function valuesStamp() {
+    if (!ctl) return "";
+    const p = ctl.page, st = ctl.state;
+    if (!p || !p.keys || !st || !st.values) return "";
+    let out = ctl.pageIndex + "|";
+    for (let i = 0; i < p.keys.length; i++) out += st.values[p.keys[i]] + "\u0001";
+    return out;
 }
 
 function tick() {
@@ -939,7 +1023,7 @@ function tick() {
 
     /* Driven from the same parsed answer the ring draws, so the two surfaces
      * cannot disagree -- and kept current off the ring page too. */
-    refreshUiOffRing();
+    refreshUi();
     const u = uiCache.parsed;
     /*
      * Resolved ONCE per frame, not per consumer: it reads a clock, and asking
@@ -972,6 +1056,7 @@ function tick() {
     if (!shouldRedraw(head)) return;
     drawnHead = head;
     drawnUiRaw = uiCache.raw;
+    drawnStamp = valuesStamp();
 
     const ctx = movy();
     clear_screen();                       /* the frame is OURS, not the library's */
@@ -1057,6 +1142,10 @@ globalThis.chain_ui_test = {
     /* The page layout is planned from these two together, and the smoke test
      * runs the HOST'S planner over them rather than restating the answer. */
     HIERARCHY,
+    /* Read-only views the tests assert THROUGH, so a check names the thing the
+     * user sees rather than a variable that happens to sit beside it. */
+    uiRaw: () => uiCache.raw,
+    state: () => (ctl ? ctl.state : null),
     /* The playhead, in the three pieces it is made of: seed the clock, read it,
      * turn it into a pad colour. Exported so the tests can drive the clock
      * rather than wait for one. */
