@@ -56,10 +56,16 @@ jobs:
             file /tmp/trance-gate/trance-gate.so; exit 1; }
           echo "Artifact OK: $(ls -la "$TARBALL")"
 
+      # `prerelease` is NOT inferred from the version. Without this a
+      # `-beta.` tag is published as a normal release and GitHub shows it as
+      # **Latest** -- so the build that needs an unreleased host becomes the
+      # one every visitor is pointed at, which is the opposite of the point of
+      # having channels at all.
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
           files: dist/trance-gate-module.tar.gz
+          prerelease: ${{ contains(github.ref_name, '-beta.') }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
