@@ -162,6 +162,23 @@ Eight bugs found and fixed; see the commit messages for the reasoning.
 - [ ] Deploy the host changes (`install.sh local` — rebuilds and restarts the
       whole host). Until then the ring is page 1 only because the cursor is
       moved there, and 3-digit ms values still truncate.
-- [ ] Release workflow + first tag. `release.json` and `src/module.json` must
-      agree on the version; the catalog entry already points at
-      `graebe/schwung-trance-gate`.
+- [x] ~~Release workflow + first tag~~ — workflow added
+      (`.github/workflows/release.yml`, adapted from schwung-ducker's, plus an
+      artifact check because softprops *warns* rather than fails on a missing
+      file). **No tag yet**, and the catalog entry stays blocked: the module
+      needs a host carrying `page_knobs` and the enum-wire fix, and that host
+      exists only in the fork (`min_host_version` is set to 1.5.0 against that).
+
+- [ ] **HOST — `frameCtx.print()` does not bound a glyph VERTICALLY.** It
+      checks the origin is inside the frame and truncates to the horizontal
+      budget, and that is all: a 7-row glyph placed 5 rows off the bottom
+      passes every check it makes, paints two rows into the band below, and
+      leaves `clipCount` **untouched** — so `clipped() === 0` reports a clean
+      frame. This module hit it (the step-amount label, fixed here by placing
+      text at `h - TEXT_H`), but the gap is the shared context's, and the file's
+      own stated guarantee is that every primitive is clipped to the frame.
+      Fixing it is a fleet-wide behaviour change — a marginally overflowing
+      label would start vanishing rather than spilling — so it wants its own
+      decision rather than a drive-by. Until then, a module cannot trust
+      `clipped()` to catch vertical text overflow and must measure it itself
+      (see `tests/smoke_ui.mjs`'s out-of-band pixel counter).

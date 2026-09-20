@@ -284,14 +284,36 @@ step('a step past the pattern is dark, whatever its amount', () => {
 const { frameCtx } = await import(SHARED + '/param_pages/frame_ctx.mjs');
 function renderRing(amount, W = 128, Hh = 40) {
     const px = Array.from({ length: Hh }, () => new Array(W).fill(0));
+    /*
+     * COUNTED, NOT SILENTLY DROPPED.
+     *
+     * frameCtx.print() bounds the glyph's ORIGIN and its horizontal budget and
+     * nothing else -- a 7-row glyph placed 5 rows off the bottom passes every
+     * check it makes and paints two rows into the band below, with clipCount
+     * untouched. So `ctx.clipped() === 0` cannot see vertical text overflow,
+     * and the only place left to measure it is here.
+     */
+    let outside = 0;
     const put = (x, y, v) => {
         x = Math.round(x); y = Math.round(y);
         if (x >= 0 && x < W && y >= 0 && y < Hh) px[y][x] = v ? 1 : 0;
+        else if (v) outside++;
     };
+    /*
+     * THE STUB HAS TO BE THE DEVICE, and for a long while it was not.
+     *
+     * movy() binds the HOST's `print`, so this page draws in the device's own
+     * font: 5 wide x 7 TALL, six-pixel monospaced advance --
+     * overlay_font_5x7[96][7] in shadow_overlay.c. This stub painted five
+     * rows at a four-pixel advance, so every pixel assertion below has been
+     * measuring a font that does not exist on the hardware. Text at y really
+     * occupies y..y+6, and two constants on the ring page were written as if
+     * it occupied y..y+4.
+     */
     const parent = {
         fillRect: (x, y, w, h, v) => { for (let j = 0; j < h; j++) for (let i = 0; i < w; i++) put(x + i, y + j, v); },
-        print: (x, y, t, v) => { const t2 = String(t); for (let i = 0; i < t2.length; i++) for (let dy = 0; dy < 5; dy++) for (let dx = 0; dx < 3; dx++) put(x + i * 4 + dx, y + dy, v); },
-        textWidth: (t) => String(t).length * 4,
+        print: (x, y, t, v) => { const t2 = String(t); for (let i = 0; i < t2.length; i++) for (let dy = 0; dy < 7; dy++) for (let dx = 0; dx < 5; dx++) put(x + i * 6 + dx, y + dy, v); },
+        textWidth: (t) => String(t).length * 6,
     };
     const ctx = frameCtx(parent, { x: 0, y: 0, w: W, h: Hh });
     const depths = 'FF'.repeat(16);
@@ -300,7 +322,7 @@ function renderRing(amount, W = 128, Hh = 40) {
                   rate: "1/16", step_amount: "0.75", amount },
         nowMs: 0,
     });
-    return { px, clipped: ctx.clipped(), W, Hh };
+    return { px, clipped: ctx.clipped(), outside, W, Hh, barTop: T.METER_TOP };
 }
 const litInBar = (r) => {
     let n = 0;
@@ -322,21 +344,66 @@ step('a read that did not answer draws the border and no fill', () => {
     const zero  = litInBar(renderRing("0"));
     if (empty !== zero) throw new Error(`unread ${empty} != zero ${zero}`);
 });
+/*
+ * THE RING MUST NOT REACH THE METER'S COLUMN, and the old version of this
+ * could not tell the difference between the ring intruding and the rate label
+ * doing its job: it counted lit pixels above the bar and allowed twenty. With
+ * the font stub corrected to the device's 7-row one, "1/16" alone exceeds
+ * that -- the threshold was measuring the wrong thing and had been tuned to a
+ * font that does not exist.
+ *
+ * At amount ZERO the meter is a border with an EMPTY interior, so any lit
+ * pixel inside that border is something else's -- which is the ring, and is
+ * the only thing this test was ever trying to catch.
+ */
 step('the meter never draws over the ring', () => {
-    /* The ring must not reach the bar's column. Compare a render with the bar
-     * against the columns it occupies: the ring is centred left of them. */
-    const r = renderRing("1");
-    let ringPixelsInBarColumns = 0;
-    for (let y = 0; y < r.Hh; y++) {
-        for (let x = r.W - 5; x < r.W; x++) {
-            /* everything in these columns should belong to the meter, which is
-             * a solid rectangle: so every lit pixel is within its border */
-            if (r.px[y][x] && y < 7) ringPixelsInBarColumns++;   /* above the bar top */
-        }
-    }
-    if (ringPixelsInBarColumns > 20)
-        throw new Error('something other than the rate text is in the meter column');
+    const r = renderRing("0");
+    let intruders = 0;
+    for (let y = r.barTop + 1; y < r.Hh - 1; y++)
+        for (let x = r.W - 5 + 1; x < r.W - 1; x++)
+            if (r.px[y][x]) intruders++;
+    if (intruders)
+        throw new Error(`${intruders} pixels inside the empty meter -- the ring reaches its column`);
 });
+/*
+ * THE REPORTED BUG, AS A RELATIONSHIP RATHER THAN A NUMBER.
+ *
+ * "The bar is too high, its top covers 1/16." The meter's top border sat on
+ * row 7 with a comment claiming it was clear of the rate text -- true for a
+ * 5-row font, and this page draws in the device's 7-row one, so row 7 was the
+ * FIRST free row and there was no gutter at all.
+ *
+ * Asserted as "the two never share a row, and there is space between them" so
+ * it fails again if either constant drifts, rather than pinning a 9 that would
+ * have to be remembered.
+ */
+step('the rate label and the meter never share a row', () => {
+    const r = renderRing("1");
+    const col = { from: r.W - 5, to: r.W };
+    let lastTextRow = -1, firstBarRow = -1;
+    for (let y = 0; y < r.Hh; y++) {
+        let lit = 0;
+        for (let x = col.from; x < col.to; x++) if (r.px[y][x]) lit++;
+        if (!lit) continue;
+        if (y < r.barTop) lastTextRow = y;             /* rate text */
+        else if (firstBarRow < 0) firstBarRow = y;     /* meter border */
+    }
+    if (lastTextRow < 0) throw new Error('no rate text drawn in the meter column');
+    if (firstBarRow < 0) throw new Error('no meter drawn');
+    if (firstBarRow <= lastTextRow)
+        throw new Error(`meter starts at row ${firstBarRow}, text still lit at ${lastTextRow}`);
+    if (firstBarRow - lastTextRow < 2)
+        throw new Error(`only ${firstBarRow - lastTextRow - 1}px between the rate text and the bar`);
+});
+
+step('no glyph escapes the band (clipped() cannot see this)', () => {
+    for (const a of ["0", "0.5", "1"]) {
+        const r = renderRing(a);
+        if (r.outside !== 0)
+            throw new Error(`amount ${a}: ${r.outside} pixels painted outside the band`);
+    }
+});
+
 step('nothing drawn outside the frame', () => {
     for (const a of ["0", "0.5", "1"]) {
         const r = renderRing(a);

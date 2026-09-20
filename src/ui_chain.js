@@ -437,7 +437,7 @@ function drawRing(ctx, o) {
     if (rateTxt) ctx.print(Math.max(0, w - ctx.textWidth(rateTxt)), 0, rateTxt, 1);
     /* Bottom-left, under the length: the two numbers that describe the
      * pattern on the left, the one that describes time on the right. */
-    if (amtTxt) ctx.print(0, h - 5, amtTxt, 1);
+    if (amtTxt) ctx.print(0, h - TEXT_H, amtTxt, 1);
 
     drawAllAmountMeter(ctx, vals.amount, w, h);
 
@@ -540,9 +540,30 @@ function drawRing(ctx, o) {
  */
 const BAR_W = 5;
 
+/*
+ * THE FONT THIS PAGE ACTUALLY DRAWS IN IS SEVEN ROWS TALL.
+ *
+ * movy() binds the HOST's `print`, not the knob grid's font4x5 -- so the ring
+ * page uses the device's own font, 5 wide by 7 TALL with a six-pixel
+ * monospaced advance (overlay_font_5x7[96][7], shadow_overlay.c). Text placed
+ * at y occupies y..y+6.
+ *
+ * Two constants here were written as though it occupied y..y+4, and they were
+ * wrong in both directions: the meter's top sat on the first row the rate
+ * label ends on, so its border touched "1/16" with no gutter at all; and the
+ * step-amount label was placed five rows off the bottom, so its last two rows
+ * fell outside the band entirely. frameCtx could not report the second --
+ * its print() bounds the glyph's ORIGIN and its horizontal budget, never the
+ * glyph's bottom -- so `clipped()` stayed zero and the test suite saw nothing.
+ *
+ * Derived from one named height now, so a font change moves both together.
+ */
+const TEXT_H = 7;
+const TEXT_GAP = 2;
+
 function drawAllAmountMeter(ctx, raw, w, h) {
     const x = w - BAR_W;
-    const top = 7;                       /* clear of the rate text above */
+    const top = TEXT_H + TEXT_GAP;       /* a real gutter under the rate text */
     const bot = h - 1;
     if (bot - top < 4) return;           /* too short to read; draw nothing */
     const height = bot - top + 1;
@@ -1150,6 +1171,8 @@ globalThis.chain_ui_test = {
     /* The page layout is planned from these two together, and the smoke test
      * runs the HOST'S planner over them rather than restating the answer. */
     HIERARCHY,
+    /* So a geometry test derives the boundary instead of restating it. */
+    METER_TOP: TEXT_H + TEXT_GAP,
     /* Read-only views the tests assert THROUGH, so a check names the thing the
      * user sees rather than a variable that happens to sit beside it. */
     uiRaw: () => uiCache.raw,
