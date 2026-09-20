@@ -204,6 +204,59 @@ step('and growing it lights them again', () => {
     if (litPads[note] === 0) throw new Error('step 32 stayed dark after growing to 32');
 });
 
+/*
+ * PAD COLOUR CARRIES TWO FACTS AND THEY MUST STAY SEPARABLE: how loud the step
+ * is, and whether it is the one being edited. Selection is one rung lighter,
+ * and the top rung is reachable only by selection -- so no unselected pad can
+ * ever look selected, whatever its amount.
+ */
+const mkUi = (steps, cursor, depths) =>
+    `${steps.toString(16).toUpperCase()}:0:8:0.000:125.00:0:${cursor}:` +
+    depths.map(d => Math.round(d * 255).toString(16).toUpperCase().padStart(2, '0')).join('');
+
+step('a louder step is a brighter pad', () => {
+    const u = T.parseUi(mkUi(0xFF, 7, [0.0, 0.5, 1.0, 1, 1, 1, 1, 1]));
+    const [quiet, mid, loud] = [T.padColour(u, 0), T.padColour(u, 1), T.padColour(u, 2)];
+    if (quiet === mid || mid === loud)
+        throw new Error(`amount ramp collapsed: ${quiet}, ${mid}, ${loud}`);
+});
+step('an off step ramps too, in red', () => {
+    const u = T.parseUi(mkUi(0x00, 7, [0.0, 0.5, 1.0, 1, 1, 1, 1, 1]));
+    const [quiet, mid, loud] = [T.padColour(u, 0), T.padColour(u, 1), T.padColour(u, 2)];
+    if (quiet === mid || mid === loud)
+        throw new Error(`red ramp collapsed: ${quiet}, ${mid}, ${loud}`);
+});
+step('the selected pad is lighter than the same step unselected', () => {
+    for (const amt of [0.0, 0.5, 1.0]) {
+        for (const steps of [0xFF, 0x00]) {
+            const depths = new Array(8).fill(amt);
+            const off = T.padColour(T.parseUi(mkUi(steps, 7, depths)), 0);  /* cursor elsewhere */
+            const on  = T.padColour(T.parseUi(mkUi(steps, 0, depths)), 0);  /* cursor here */
+            if (off === on)
+                throw new Error(`amount ${amt}, steps ${steps}: selected looks identical`);
+        }
+    }
+});
+step('no unselected pad can wear the selected-only colour', () => {
+    const selectedTop = new Set();
+    for (const steps of [0xFF, 0x00]) {
+        const d = new Array(8).fill(1.0);
+        selectedTop.add(T.padColour(T.parseUi(mkUi(steps, 0, d)), 0));
+    }
+    for (const steps of [0xFF, 0x00]) {
+        for (const amt of [0, 0.2, 0.4, 0.6, 0.8, 1.0]) {
+            const d = new Array(8).fill(amt);
+            const c = T.padColour(T.parseUi(mkUi(steps, 7, d)), 0);
+            if (selectedTop.has(c))
+                throw new Error(`unselected at amount ${amt} wears colour ${c}`);
+        }
+    }
+});
+step('a step past the pattern is dark, whatever its amount', () => {
+    const u = T.parseUi(mkUi(0xFF, 0, new Array(8).fill(1)));
+    if (T.padColour(u, 8) !== 0) throw new Error('past-the-end pad is not dark');
+});
+
 rmSync(OUT, { recursive: true, force: true });
 console.log(failures ? `\nFAILED (${failures})` : '\nPASS');
 process.exit(failures ? 1 : 0);

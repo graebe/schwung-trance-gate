@@ -34,7 +34,8 @@ import {
     setLED, invalidateLedCache
 } from '/data/UserData/schwung/shared/input_filter.mjs';
 import {
-    Black, BrightRed, DeepRed, NeonGreen, DarkGrass
+    Black, BrightRed, DeepRed, RustRed, PaleSalmon,
+    DullGreen, NeonGreen, TealGreen, PaleGreen
 } from '/data/UserData/schwung/shared/constants.mjs';
 
 /* The prefix WE choose. The controller asks getParam for "<prefix>:<key>";
@@ -360,12 +361,37 @@ function drawRing(ctx, o) {
      */
     const lenTxt  = String(u.length);
     const rateTxt = String(vals.rate === undefined || vals.rate === null ? "" : vals.rate);
-    const leftW  = ctx.textWidth(lenTxt);
+
+    /*
+     * THE SELECTED STEP'S AMOUNT, NAMED ON THE PAGE THAT EDITS IT.
+     *
+     * It is knob 1 here, but a canvas page draws no cells -- so the encoder
+     * worked and nothing said what it was or what it had done, and the only
+     * way to read it back was to touch the knob and watch the header. It costs
+     * no read: `step_amount` is one of this page's own keys, so it is already
+     * in the values map the drawer is handed.
+     *
+     * Drawn from the DSP's value rather than from the ring's `depths` run: the
+     * depths are a snapshot on the slow rotation, while this key is on the
+     * page and refreshes with the knob, so it is the one that keeps up with a
+     * turn.
+     */
+    const rawAmt = vals.step_amount;
+    let amtTxt = "";
+    if (rawAmt !== undefined && rawAmt !== null && rawAmt !== "") {
+        const n = Number(rawAmt);
+        if (isFinite(n)) amtTxt = Math.round(n * 100) + "%";
+    }
+
+    const leftW  = Math.max(ctx.textWidth(lenTxt), ctx.textWidth(amtTxt));
     const rightW = ctx.textWidth(rateTxt);
     const pad = 2;
 
     ctx.print(0, 0, lenTxt, 1);
     if (rateTxt) ctx.print(Math.max(0, w - rightW), 0, rateTxt, 1);
+    /* Bottom-left, under the length: the two numbers that describe the
+     * pattern on the left, the one that describes time on the right. */
+    if (amtTxt) ctx.print(0, h - 5, amtTxt, 1);
 
     const gapL = leftW + pad;
     const gapR = w - rightW - pad;
@@ -479,13 +505,42 @@ function refreshUiOffRing() {
     if (raw !== null && raw !== undefined && raw !== "") parseUiCached(raw);
 }
 
-/* What colour step `i` should be, given the current pattern. */
+/*
+ * BRIGHTNESS IS THE STEP'S AMOUNT; SELECTION IS ONE NOTCH LIGHTER.
+ *
+ * Two facts on one channel, so they have to be separable by eye. They are,
+ * because the amount ramp deliberately stops short of the top: a selected pad
+ * always sits one rung above where its own amount would have put it, and the
+ * top rung is reachable ONLY by selection.
+ *
+ * The ramps are ordered by measured luminance rather than by name, because the
+ * palette's names do not track brightness -- `BrightGreen` is an alias for
+ * bright YELLOW, and the dim/dark partners are per-hue rather than a single
+ * scale. As a percentage of DullGreen: TealGreen 55, NeonGreen 72, DullGreen
+ * 100, PaleGreen 110. So an amount of zero still shows at about half
+ * brightness and the pad stays readable -- a step that is ON is visibly on
+ * however quiet it is, which is the point of lighting it at all.
+ *
+ * Reds run the same way against BrightRed: DeepRed 40, RustRed 72,
+ * BrightRed 100, PaleSalmon well above it for the selected top rung.
+ */
+const GREEN_RAMP = [TealGreen, NeonGreen, DullGreen, PaleGreen];
+const RED_RAMP   = [DeepRed,   RustRed,   BrightRed, PaleSalmon];
+
 function padColour(u, i) {
     if (!u || i >= u.length) return Black;          /* past the pattern: dark */
+
     const on = (u.steps >> i) & 1;
     const selected = (i === u.cursor);
-    if (on) return selected ? NeonGreen : DarkGrass;
-    return selected ? BrightRed : DeepRed;
+
+    /* Three rungs for the amount, and selection borrows the fourth. An absent
+     * depth means full, never silent -- the same rule the state migration
+     * uses, for the same reason. */
+    const amount = (u.depths && u.depths[i] !== undefined) ? u.depths[i] : 1;
+    let rung = amount >= 0.67 ? 2 : (amount >= 0.34 ? 1 : 0);
+    if (selected) rung += 1;
+
+    return (on ? GREEN_RAMP : RED_RAMP)[rung];
 }
 
 /*
@@ -798,6 +853,7 @@ function handleBack() {
 /* Pure helpers, exported for tests. The host never looks at this. */
 globalThis.chain_ui_test = {
     parseUi,
+    padColour,
     stepToNote,
     noteToStep,
     /* Which ring segment the cursor bracket is drawn over, given a `ui`
