@@ -156,10 +156,11 @@ int main(void) {
           strcmp(get(api, inst, "rate"), "1/16") == 0);
 
     /* --- stopped transport ---------------------------------------------- */
+    /* One behaviour now, not a mode: stopped means the gate holds open. */
     printf("stopped transport:\n");
     g_beats = -1.0;
     double lvl = run_dc(api, inst, 4410, 10000);
-    check_near("Open: passes through untouched", lvl, 10000.0, 1.0);
+    check_near("stopped: passes through untouched", lvl, 10000.0, 1.0);
 
     /* --- a plain alternating gate --------------------------------------- */
     printf("gate, 1/16 at 120 BPM, alternating steps:\n");
@@ -364,6 +365,7 @@ int main(void) {
     check("rate survives",     strcmp(get(api, inst, "rate"), "1/8T") == 0);
     check("attack survives",   strcmp(get(api, inst, "attack"), "12.5") == 0);
     api->destroy_instance(inst);
+
 
     /* A numeric rate in a blob is an INDEX. Resolving it as "unknown" would
      * reset the rate on load while still reporting a plausible one. */
@@ -601,22 +603,14 @@ int main(void) {
           atoi(get(api, inst, "cursor")) <= 8);
     api->destroy_instance(inst);
 
-    /* --- B4: free-run phase must not grow without bound ------------------- */
-    printf("free-run phase:\n");
-    inst = api->create_instance(NULL, NULL);
-    set_length(api, inst, 16);
-    set(api, inst, "pattern", "FFFF");
-    set(api, inst, "stopped", "Free");
-    g_beats = -1.0;                                /* no transport */
-    /* Two minutes of audio. Unwrapped this climbs forever; the int floor in
-     * process_block is undefined once it passes INT_MAX, and the fraction goes
-     * long before that. */
-    for (int i = 0; i < 40000; i++) run_dc(api, inst, 128, 0);
-    {
-        double ph = atof(get(api, inst, "phase"));
-        check("free-run phase stays inside the pattern", ph >= 0.0 && ph < 16.0);
-    }
-    api->destroy_instance(inst);
+    /*
+     * B4 -- "free-run phase must not grow without bound" -- lived here. The
+     * mode it guarded is gone, and with it the only path that accumulated
+     * step_pos with no transport to anchor against: every remaining path is
+     * re-anchored per block against an absolute beats/beats_per_step, so
+     * there is nothing left that can climb. Recorded rather than silently
+     * deleted, because a removed test looks the same as a forgotten one.
+     */
 
     /* --- the v2 -> v3 fold ------------------------------------------------ */
     printf("state v2 -> v3 (mix x depth -> amount):\n");

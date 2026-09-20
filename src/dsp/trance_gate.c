@@ -80,7 +80,6 @@ _Static_assert(TG_STATE_WORST_CASE <= 1024,
                "shrink the encoding or TG_SLOTS");
 
 enum { TG_IDLE = 0, TG_ATTACK, TG_DECAY, TG_SUSTAIN, TG_RELEASE };
-enum { TG_STOPPED_OPEN = 0, TG_STOPPED_FREE };
 
 /* ---------------------------------------------------------------- rates --
  *
@@ -150,7 +149,6 @@ typedef struct tg_instance {
      * effect is bypassed. This is the old `depth` AND the old `mix`: they were
      * one quantity with two names (see TG_STATE_VERSION), so it has one now. */
     float amount;
-    int   stopped_mode;
     int   cursor;         /* edit position on the ring, 0..length-1 */
 
     /* Runtime. Not saved. */
@@ -180,15 +178,13 @@ typedef struct tg_instance {
      * recomputed in get_param because get_param runs on the audio callback
      * too and must stay trivial. */
     float  ms_per_step;
-    /* "THE PLAYHEAD IS MOVING", which is NOT "the transport is running".
-     *
-     * Under TG_STOPPED_FREE the pattern advances with the transport stopped --
-     * that is the whole point of the mode -- so a field holding `beats >= 0`
-     * reported 0 while step_pos genuinely moved, and the UI's extrapolator
-     * (the only reader) froze its playhead exactly where it was most wanted.
-     * The name carries the distinction because a field called `running`
-     * holding "running or free-running" is the sort of quiet lie the next
-     * reader acts on. */
+    /* "THE PLAYHEAD IS MOVING". Equal to the transport state today, and kept
+     * as its own name on purpose: the UI's extrapolator is the only reader
+     * and is written against the concept, not against what drives it. It once
+     * held `beats >= 0` while a free-run mode moved step_pos with the
+     * transport stopped, and the playhead froze exactly where it was most
+     * wanted. That mode is gone; the distinction is cheap to keep and the
+     * lesson is not. */
     int    advancing;
 } tg_instance_t;
 
@@ -377,11 +373,11 @@ static void v2_process_block(void *instance, int16_t *audio_inout, int frames) {
     int running = (beats >= 0.0);
 
     /* What the UI needs to animate between reads -- see the `ui` readout.
-     * Free-run counts as advancing: the branch below moves step_pos with no
-     * transport at all. `running` itself is untouched -- the sync logic and
-     * `was_running` still mean the transport and nothing else. */
+     * It equals `running` now that free-run is gone, and keeps its own name
+     * because the UI is written against the CONCEPT -- "is the playhead
+     * moving" -- and must not have to know what makes it move. */
     in->ms_per_step = (float)(samples_per_step * 1000.0 / SAMPLE_RATE);
-    in->advancing = running || in->stopped_mode == TG_STOPPED_FREE;
+    in->advancing = running;
 
     if (running) {
         double target = beats / beats_per_step;
@@ -407,22 +403,19 @@ static void v2_process_block(void *instance, int16_t *audio_inout, int frames) {
                 inc += (err * TG_TRACK_GAIN) / (double)frames;
             }
         }
-    } else if (in->stopped_mode == TG_STOPPED_FREE) {
+    } else {
         /*
-         * FREE-RUN WRAPS; THE SYNCED PATH MUST NOT.
+         * STOPPED MEANS OPEN. Hold the gate open and park at step 0, so the
+         * next start is a downbeat rather than wherever the pattern happened
+         * to stop.
          *
-         * With a transport, step_pos is re-anchored every block against an
-         * ABSOLUTE beats/beats_per_step, so it has to stay absolute. Free-run
-         * has no such anchor and simply accumulates -- for as long as the
-         * device is on. Left alone it walks off the end of what an int can
-         * hold (the floor below is then undefined) and loses fractional
-         * resolution long before that.
+         * This used to be one of two modes, the other being a free-run that
+         * accumulated step_pos with no transport to anchor against -- which is
+         * why it needed an explicit fmod wrap to stop it walking off the end
+         * of what a double indexes cleanly. With it gone, every path that
+         * moves step_pos is re-anchored per block against an ABSOLUTE
+         * beats/beats_per_step, so nothing is left that can grow unbounded.
          */
-        in->step_pos = fmod(in->step_pos, (double)length);
-        if (in->step_pos < 0.0) in->step_pos += length;
-    } else if (in->stopped_mode == TG_STOPPED_OPEN) {
-        /* Hold the gate open and park at step 0 so the next start is a
-         * downbeat rather than wherever the pattern happened to stop. */
         in->step_pos = 0.0;
         in->last_step = -1;
         in->env_stage = TG_IDLE;
@@ -571,7 +564,6 @@ static void *v2_create_instance(const char *module_dir, const char *config_json)
     in->release_ms = 20.0f;
     in->hold = 1.0f;
     in->amount = 1.0f;
-    in->stopped_mode = TG_STOPPED_OPEN;
 
     in->last_step = -1;
     in->env_stage = TG_IDLE;
@@ -623,9 +615,6 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
         in->release_ms = clampf((float)atof(val), 0.0f, 500.0f);
     } else if (strcmp(key, "amount") == 0) {
         in->amount = clampf((float)atof(val), 0.0f, 1.0f);
-    } else if (strcmp(key, "stopped") == 0) {
-        in->stopped_mode = (strcmp(val, "Free") == 0 || atoi(val) == 1)
-                         ? TG_STOPPED_FREE : TG_STOPPED_OPEN;
     } else if (strcmp(key, "cursor") == 0) {
         /*
          * THE WIRE CARRIES THE OPTION INDEX, and the option NAMES carry the
@@ -736,7 +725,6 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
                                     0.0f, 1.0f);
             }
         }
-        if (json_get_number(val, "stopped", &n) == 0) in->stopped_mode = (n >= 0.5) ? 1 : 0;
 
         /* Patterns travel as one array of "steps:ties:length" triples so a
          * slot cannot be restored half-applied. */
@@ -795,8 +783,6 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
     if (strcmp(key, "release") == 0) return snprintf(buf, buf_len, "%.1f", in->release_ms);
     if (strcmp(key, "hold") == 0)    return snprintf(buf, buf_len, "%.2f", in->hold);
     if (strcmp(key, "amount") == 0)  return snprintf(buf, buf_len, "%.2f", in->amount);
-    if (strcmp(key, "stopped") == 0) return snprintf(buf, buf_len, "%s",
-                                        in->stopped_mode == TG_STOPPED_FREE ? "Free" : "Open");
     if (strcmp(key, "cursor") == 0) return snprintf(buf, buf_len, "%d", in->cursor);
     if (strcmp(key, "step") == 0) {
         uint32_t bit = 1u << in->cursor;
@@ -863,10 +849,10 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         int n = snprintf(buf, buf_len,
             "{\"sv\":%d,\"slot\":%d,\"rate\":\"%s\","
             "\"attack\":%.2f,\"decay\":%.2f,\"sustain\":%.3f,\"release\":%.2f,"
-            "\"hold\":%.3f,\"amount\":%.3f,\"stopped\":%d",
+            "\"hold\":%.3f,\"amount\":%.3f",
             TG_STATE_VERSION, in->slot, tg_rates[in->rate_idx].label,
             in->attack_ms, in->decay_ms, in->sustain, in->release_ms,
-            in->hold, in->amount, in->stopped_mode);
+            in->hold, in->amount);
         for (int s = 0; s < TG_SLOTS && n > 0 && n < buf_len; s++) {
             n += snprintf(buf + n, buf_len - n, ",\"p%d\":\"%X:%X:%d:",
                           s, in->pat[s].steps, in->pat[s].ties, in->pat[s].length);
@@ -979,8 +965,6 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
          * switch plus a tie switch -- see set_param. */
         "{\"key\":\"step\",\"name\":\"Gate\",\"short_name\":\"Gate\",\"type\":\"enum\","
           "\"options\":[\"Off\",\"On\",\"Tie\"],\"default\":\"Off\"},"
-        "{\"key\":\"stopped\",\"name\":\"Stop\",\"type\":\"enum\","
-          "\"options\":[\"Open\",\"Free\"],\"default\":\"Open\"},"
         "{\"key\":\"attack\",\"name\":\"Att\",\"type\":\"float\",\"min\":0,\"max\":500,"
           "\"default\":2,\"step\":1,\"unit\":\"ms\","
           "\"viz\":{\"group\":\"adsr\",\"role\":\"attack\",\"kind\":\"envelope\"}},"
@@ -1038,7 +1022,7 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
            * settings you leave alone. Those two live on the grid only, and
            * `slot` and `step_amount` live here only. */
           "\"page_knobs\":[\"slot\",\"amount\",\"step_amount\","
-            "\"attack\",\"decay\",\"sustain\",\"release\"]}"
+            "\"attack\",\"decay\",\"sustain\",\"release\",\"hold\"]}"
         "]";
         int len = (int)strlen(params);
         if (len >= buf_len) return -1;
@@ -1067,12 +1051,10 @@ static void tg_on_midi(tg_instance_t *in, const uint8_t *msg, int len) {
         in->last_step = -1;
         in->was_running = 0;         /* next block anchors hard */
         break;
-    case 0xFC:                       /* Stop */
-        if (in->stopped_mode == TG_STOPPED_OPEN) {
-            in->env_stage = TG_IDLE;
-            in->env = 0.0f;
-            in->last_step = -1;
-        }
+    case 0xFC:                       /* Stop: open the gate */
+        in->env_stage = TG_IDLE;
+        in->env = 0.0f;
+        in->last_step = -1;
         in->was_running = 0;
         break;
     default:

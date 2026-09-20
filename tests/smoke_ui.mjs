@@ -396,17 +396,6 @@ step('nothing drawn outside the frame', () => {
         if (headAt(u, 1000 + 10 * MS_STEP) !== -1) throw new Error('it started sweeping while stopped');
     });
 
-    /*
-     * Stop=Free advances the pattern with the TRANSPORT STOPPED -- that is the
-     * whole mode -- so the DSP reports `advancing`, not `beats >= 0`. A naive
-     * "is the transport running" check kills the sweep in exactly the mode
-     * whose purpose is to run without one.
-     */
-    step('free-run sweeps even though the transport is stopped', () => {
-        const u = seed(0.0, 1, 1000);            /* advancing = 1, no transport */
-        if (headAt(u, 1000 + 3 * MS_STEP) !== 3) throw new Error('free-run did not sweep');
-    });
-
     step('a head past the pattern is refused (stale anchor length)', () => {
         const u = seed(3.25, 1, 1000);
         u.length = 2;                            /* Len knob just shrank it */
@@ -657,7 +646,7 @@ step('nothing drawn outside the frame', () => {
     const page = (i) => (r.pages[i] ? (r.pages[i].keys || []).join(',') : '<missing>');
 
     step('page 1 is the ring, with its own knobs', () => {
-        const want = 'slot,amount,step_amount,attack,decay,sustain,release';
+        const want = 'slot,amount,step_amount,attack,decay,sustain,release,hold';
         if (!r.pages[0] || !r.pages[0].canvas) throw new Error('page 1 is not the canvas page');
         if (page(0) !== want) throw new Error(`got ${page(0)}`);
     });
@@ -665,8 +654,23 @@ step('nothing drawn outside the frame', () => {
         const want = 'length,rate,amount,hold,attack,decay,sustain,release';
         if (page(1) !== want) throw new Error(`got ${page(1)}`);
     });
-    step('page 3 holds what is left', () => {
-        if (page(2) !== 'stopped') throw new Error(`got ${page(2)}`);
+    /*
+     * THERE IS NO THIRD PAGE. Asserted as a COUNT rather than as "page 3 is
+     * not `stopped`", so a page coming back under any other name fails here
+     * instead of passing a check that only knew the old one's name.
+     * (The host appends My Presets / Module after the walk; those are not
+     * this module's pages and planPages does not emit them here.)
+     */
+    step('the module plans exactly two pages', () => {
+        if (r.pages.length !== 2)
+            throw new Error(`${r.pages.length}: ` + r.pages.map((p) => p.name).join(', '));
+    });
+
+    /* A declaration left behind would put an orphan cell back on the grid
+     * with no code behind it -- a knob that reads and writes nothing. */
+    step('`stopped` is gone from chain_params entirely', () => {
+        if (chainParams.some((p) => p.key === 'stopped'))
+            throw new Error('stopped is still declared');
     });
     step('the two pages do NOT share a key list', () => {
         if (page(0) === page(1)) throw new Error('ring and grid collapsed onto one list');

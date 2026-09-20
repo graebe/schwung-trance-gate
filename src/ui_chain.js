@@ -145,8 +145,7 @@ const HIERARCHY = JSON.stringify({
             name: "Gate",
             children: null,
             knobs: ["length", "rate", "amount", "hold",
-                    "attack", "decay", "sustain", "release",
-                    "stopped"],
+                    "attack", "decay", "sustain", "release"],
             params: ["gate"]
         }
     }
@@ -310,8 +309,8 @@ function parseUi(raw) {
         length,
         phase: isFinite(phase) ? phase : 0,
         msStep: isFinite(msStep) && msStep > 0 ? msStep : 0,
-        /* "the playhead is advancing", which under Stop=Free is true with the
-         * transport stopped. See the `advancing` field in trance_gate.c. */
+        /* "the playhead is advancing". See the `advancing` field in
+         * trance_gate.c for why it is not simply called `running`. */
         moving,
         /* 0-based here; the `cursor` PARAM is 1-based because it is shown as a
          * step number. The two spellings meet only in the DSP. */
