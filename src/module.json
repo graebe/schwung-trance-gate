@@ -2,11 +2,7 @@
   "id": "trance-gate",
   "name": "Trance Gate",
   "abbrev": "TG",
-<<<<<<< HEAD
   "version": "0.3.0-beta.1",
-=======
-  "version": "0.2.0",
->>>>>>> feature/trance-gate
   "description": "Tempo-locked step gate with ADSR, ties and pad editing",
   "author": "graebe",
   "license": "MIT",
