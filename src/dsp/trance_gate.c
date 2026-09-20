@@ -158,10 +158,23 @@ typedef struct tg_instance {
     int    last_step;     /* step index at the previous sample; -1 = none */
     int    was_running;
     int    env_stage;
-    double env_pos;       /* samples elapsed in the current stage */
-    double env_len;       /* samples in the current stage */
+    /* Position through the current stage as 0..1, advanced by a PRECOMPUTED
+     * reciprocal. It used to hold a sample COUNT and divide by the stage
+     * length every sample -- a double division per sample, per channel pair,
+     * for a quotient whose denominator cannot change inside a stage. */
+    double env_t;
+    double env_inc;       /* 1 / stage length in samples; 0 for a zero stage */
     float  env;           /* 0..1 */
     float  rel_from;      /* env level when RELEASE began */
+    /* ATTACK NEEDS THE SAME MEMORY RELEASE ALWAYS HAD, and not having it was
+     * the click. env_t starts at 0 and the ramp was `env = t`, so an attack
+     * restarted from SILENCE wherever the envelope actually was: at the
+     * boundary between two adjacent ON steps the gain went 1.000 -> 0.000 in
+     * ONE SAMPLE, which is a click by definition. A gap resets the envelope
+     * to 0 legitimately, so alternating on/off never showed it and a run of
+     * consecutive ON steps clicked at every boundary -- which is what made it
+     * read as intermittent. */
+    float  att_from;      /* env level when ATTACK began */
 
     /* Published for the UI, computed once per block. Held here rather than
      * recomputed in get_param because get_param runs on the audio callback
@@ -254,19 +267,25 @@ static inline double ms_to_samples(float ms) {
 static void env_enter(tg_instance_t *in, int stage) {
     for (;;) {
         in->env_stage = stage;
-        in->env_pos = 0.0;
+        in->env_t = 0.0;
 
+        double len;
         switch (stage) {
-        case TG_ATTACK:  in->env_len = ms_to_samples(in->attack_ms);  break;
-        case TG_DECAY:   in->env_len = ms_to_samples(in->decay_ms);   break;
-        case TG_RELEASE: in->env_len = ms_to_samples(in->release_ms);
+        case TG_ATTACK:  len = ms_to_samples(in->attack_ms);
+                         in->att_from = in->env;                      break;
+        case TG_DECAY:   len = ms_to_samples(in->decay_ms);           break;
+        case TG_RELEASE: len = ms_to_samples(in->release_ms);
                          in->rel_from = in->env;                      break;
-        default:         in->env_len = 0.0;                           break;
+        default:         len = 0.0;                                   break;
         }
+        /* The one division a stage pays, taken once instead of per sample.
+         * Guarded by the zero-length walk below, so it is only ever taken on
+         * a positive length. */
+        in->env_inc = (len > 0.0) ? (1.0 / len) : 0.0;
 
         /* SUSTAIN and IDLE have no length and are where the walk stops. */
         if (stage != TG_ATTACK && stage != TG_DECAY && stage != TG_RELEASE) return;
-        if (in->env_len > 0.0) return;
+        if (len > 0.0) return;
 
         switch (stage) {
         case TG_ATTACK:  in->env = 1.0f;        stage = TG_DECAY;   break;
@@ -279,24 +298,23 @@ static void env_enter(tg_instance_t *in, int stage) {
 static inline void env_advance(tg_instance_t *in) {
     switch (in->env_stage) {
     case TG_ATTACK:
-        in->env = (float)(in->env_pos / in->env_len);
-        if (++in->env_pos >= in->env_len) { in->env = 1.0f; env_enter(in, TG_DECAY); }
+        /* FROM WHERE IT IS, not from zero -- the same thing RELEASE does with
+         * rel_from. It still REACHES 1.0 and still takes attack_ms to get
+         * there; it simply does not fall off a cliff first. */
+        in->env = (float)(in->att_from + (1.0 - in->att_from) * in->env_t);
+        if ((in->env_t += in->env_inc) >= 1.0) { in->env = 1.0f; env_enter(in, TG_DECAY); }
         break;
-    case TG_DECAY: {
-        double t = in->env_pos / in->env_len;
-        in->env = (float)(1.0 - (1.0 - in->sustain) * t);
-        if (++in->env_pos >= in->env_len) { in->env = in->sustain; env_enter(in, TG_SUSTAIN); }
+    case TG_DECAY:
+        in->env = (float)(1.0 - (1.0 - in->sustain) * in->env_t);
+        if ((in->env_t += in->env_inc) >= 1.0) { in->env = in->sustain; env_enter(in, TG_SUSTAIN); }
         break;
-    }
     case TG_SUSTAIN:
         in->env = in->sustain;
         break;
-    case TG_RELEASE: {
-        double t = in->env_pos / in->env_len;
-        in->env = (float)(in->rel_from * (1.0 - t));
-        if (++in->env_pos >= in->env_len) { in->env = 0.0f; env_enter(in, TG_IDLE); }
+    case TG_RELEASE:
+        in->env = (float)(in->rel_from * (1.0 - in->env_t));
+        if ((in->env_t += in->env_inc) >= 1.0) { in->env = 0.0f; env_enter(in, TG_IDLE); }
         break;
-    }
     case TG_IDLE:
     default:
         in->env = 0.0f;
@@ -415,10 +433,39 @@ static void v2_process_block(void *instance, int16_t *audio_inout, int frames) {
     }
     in->was_running = running;
 
-    for (int i = 0; i < frames; i++) {
-        int step = (int)floor(in->step_pos);
-        step = ((step % length) + length) % length;
+    /*
+     * AMOUNT ZERO IS A TRUE BYPASS, so do not spend a block proving it.
+     *
+     * m = 1 - amount*(1 - env*level) collapses to exactly 1.0 when amount is
+     * 0, i.e. every sample is multiplied by one and written back unchanged.
+     * The phase and the envelope are still advanced above and below this
+     * point -- only the per-sample gain work is skipped -- so turning Amount
+     * back up lands on the step the pattern would have reached, not on the
+     * one it was left at.
+     */
+    if (in->amount <= 0.0f) {
+        in->step_pos += inc * (double)frames;
+        return;   /* the buffer is already the dry signal */
+    }
 
+    /*
+     * THE STEP INDEX IS CARRIED, NOT RECOMPUTED.
+     *
+     * It used to be `(int)floor(step_pos)` followed by `((step % length) +
+     * length) % length` EVERY SAMPLE -- a double floor plus two integer
+     * divisions to answer a question whose answer changes only at a step
+     * boundary, i.e. a few times per block at most. Derived once here and
+     * advanced by the same carry that advances the phase.
+     *
+     * `step_pos` itself still accumulates absolutely, because the synced path
+     * re-anchors against an absolute beats/beats_per_step next block. This is
+     * a cheaper way to READ it, not a replacement for it.
+     */
+    double frac = in->step_pos - floor(in->step_pos);
+    int step = (int)fmod(floor(in->step_pos), (double)length);
+    if (step < 0) step += length;
+
+    for (int i = 0; i < frames; i++) {
         if (step != in->last_step) {
             on_step_boundary(in, p, in->last_step, step);
             in->last_step = step;
@@ -434,7 +481,6 @@ static void v2_process_block(void *instance, int16_t *audio_inout, int frames) {
          * the boundary exactly as before.
          */
         if (in->hold < 1.0f && in->env_stage != TG_RELEASE && in->env_stage != TG_IDLE) {
-            double frac = in->step_pos - floor(in->step_pos);
             if (frac >= (double)in->hold &&
                 !(pat_step_on(p, step) && pat_step_tied(p, step))) {
                 env_enter(in, TG_RELEASE);
@@ -479,6 +525,18 @@ static void v2_process_block(void *instance, int16_t *audio_inout, int frames) {
         audio_inout[i * 2 + 1] = (int16_t)(r > 32767.0f ? 32767.0f : (r < -32768.0f ? -32768.0f : r));
 
         in->step_pos += inc;
+
+        /*
+         * `while`, not `if`: samples_per_step is clamped to >= 1.0 so `inc`
+         * cannot exceed 1.0 today and one crossing per sample is all that can
+         * happen -- but the PLL adds a per-block correction to `inc`, and a
+         * loop that is correct for any positive increment costs a predicted
+         * not-taken branch. The backward guard is the same argument for a
+         * correction that momentarily outruns the increment.
+         */
+        frac += inc;
+        while (frac >= 1.0) { frac -= 1.0; if (++step >= length) step = 0; }
+        while (frac < 0.0)  { frac += 1.0; if (--step < 0) step = length - 1; }
     }
 }
 

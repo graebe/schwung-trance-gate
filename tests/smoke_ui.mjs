@@ -33,11 +33,14 @@ let uiMoving = 1;               /* the `advancing` field, not "transport on" */
 const litPads = Object.create(null);
 const params = Object.create(null);
 
+let clearCount = 0;
+let chainParamReads = 0;
 for (const n of ['clear_screen', 'fill_rect', 'draw_rect', 'print', 'set_pixel',
                  'draw_line', 'draw_arc', 'fill_circle', 'draw_circle',
                  'host_pad_block', 'shadow_component_run_action']) {
     globalThis[n] = () => 0;
 }
+globalThis.clear_screen = () => { clearCount++; return 0; };
 globalThis.text_width = (s) => String(s).length * 6;
 globalThis.tts_get_enabled = () => false;
 globalThis.param_view_get_mode = () => 1;
@@ -52,7 +55,7 @@ globalThis.host_module_set_param = (k, v) => { params[k] = String(v); return tru
 globalThis.host_module_get_param = (k) => {
     if (k in params) return params[k];
     /* Enough of the real contract to let the controller plan pages. */
-    if (k === 'chain_params') return readFileSync(process.env.TG_PARAMS, 'utf8');
+    if (k === 'chain_params') { chainParamReads++; return readFileSync(process.env.TG_PARAMS, 'utf8'); }
     if (k === 'ui')      return `FFFFFFFF:0:${uiLength}:${uiPhase.toFixed(3)}:125.00:${uiMoving}:2:` + 'FF'.repeat(uiLength);
     if (k === 'state')   return '{"sv":3}';
     if (k === 'name')    return 'TRANCE GATE';
@@ -444,6 +447,94 @@ step('nothing drawn outside the frame', () => {
         if (white.length !== 1) throw new Error(`${white.length} white pads on the grid`);
         if (T.noteToStep(+white[0]) !== 5) throw new Error(`white pad is step ${T.noteToStep(+white[0])}`);
     });
+}
+
+/*
+ * IDLE COST: the screen is painted at the STEP rate, not the frame rate.
+ *
+ * The only self-moving thing on this page is the ring's playhead, and at 1/16
+ * and 120 BPM it advances eight times a second. Painting the whole page
+ * forty-four times a second to show it is the bulk of the module's idle cost.
+ */
+{
+    /* A clock we own, so nothing here waits on a real one. */
+    const realNow = Date.now;
+    /* AHEAD of the real clock, not behind it: the tests above stamped
+     * lastInputMs with Date.now(), and a stub clock in the past makes every
+     * elapsed time negative. */
+    let NOW = realNow() + 10_000_000;
+    const ticks = (n) => { for (let i = 0; i < n; i++) ui.tick(); };
+    const PAST_TAIL = 5000;          /* > ANIM_TAIL_MS (1600) */
+
+    try {
+        Date.now = () => NOW;
+
+        step('a parked playhead redraws nothing at all', () => {
+            uiMoving = 0;                        /* nothing animating */
+            NOW += PAST_TAIL; ticks(6);            /* let the tail expire */
+            NOW += PAST_TAIL; ticks(4);
+            clearCount = 0;
+            ticks(20);
+            if (clearCount !== 0) throw new Error(`${clearCount} redraws with nothing moving`);
+        });
+
+        step('an input redraws, and keeps redrawing while it animates', () => {
+            clearCount = 0;
+            ui.onMidiMessageInternal(new Uint8Array([0x90, T.stepToNote(0), 100]));
+            ticks(10);
+            if (clearCount < 10) throw new Error(`only ${clearCount} redraws inside the tail`);
+        });
+
+        step('...and stops once the animation can no longer be running', () => {
+            NOW += PAST_TAIL; ticks(2);
+            clearCount = 0;
+            ticks(20);
+            if (clearCount !== 0) throw new Error(`${clearCount} redraws after the tail expired`);
+        });
+
+        step('the playhead crossing a step earns exactly one redraw', () => {
+            uiMoving = 1; uiPhase = 0.0;
+            NOW += PAST_TAIL; ticks(10);           /* re-anchor, expire the tail */
+            NOW += PAST_TAIL; ticks(4);
+            clearCount = 0;
+            ticks(5);                            /* same step, same clock */
+            const idle = clearCount;
+            NOW += 130;                            /* one 1/16 step at 120 BPM */
+            ticks(5);
+            if (clearCount - idle < 1) throw new Error('crossing a step did not redraw');
+            if (clearCount - idle > 2) throw new Error(`${clearCount - idle} redraws for one crossing`);
+        });
+
+        step('a pattern edit redraws even with the playhead parked', () => {
+            uiMoving = 0;
+            NOW += PAST_TAIL; ticks(10);
+            NOW += PAST_TAIL; ticks(4);
+            clearCount = 0;
+            ticks(4);
+            uiLength = 8;                        /* as the Len knob would */
+            ticks(20);                           /* the off-ring read is 1-in-8 */
+            if (clearCount === 0) throw new Error('a pattern change drew nothing');
+            uiLength = 16;
+            ticks(20);
+        });
+
+        /*
+         * reloadIfChanged is NOT a cheap guard: it reads chain_params over IPC
+         * and runs a whole planPages() before it can compare fingerprints.
+         * Per-tick it was the module's largest single cost.
+         */
+        step('the contract is re-read on an interval, not every tick', () => {
+            NOW += PAST_TAIL; ticks(4);
+            chainParamReads = 0;
+            ticks(64);
+            if (chainParamReads === 0) throw new Error('the contract is never re-read');
+            if (chainParamReads > 4) throw new Error(`${chainParamReads} contract reads in 64 ticks`);
+        });
+    } finally {
+        Date.now = realNow;
+        uiMoving = 1; uiPhase = 3.250; uiLength = 16;
+        ticks(4);
+    }
 }
 
 /*

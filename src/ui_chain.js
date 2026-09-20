@@ -156,6 +156,37 @@ let ctl = null;
 let needsRedraw = true;
 
 /*
+ * REDRAW AT THE STEP RATE, NOT THE FRAME RATE.
+ *
+ * The only thing on this screen that moves on its own is the ring's playhead,
+ * and at 1/16 and 120 BPM it advances EIGHT times a second. Painting the whole
+ * page forty-four times a second to show it was the bulk of this module's idle
+ * cost -- a full page render is ~1.68 ms, so the steady state was spending
+ * ~7% of a core drawing the same picture.
+ *
+ * THE INPUT TAIL IS LOAD-BEARING. The controller animates -- the enum peek,
+ * the turn claim, a cell's value flash -- and there is no isAnimating() to
+ * ask. Every one of those is raised by an INPUT and expires on a timer, so a
+ * window after the last input covers them all. It must outlive the longest:
+ * ENUM_PEEK_MS is 1500 and TURN_CLAIM_MS is 1200 (page_controller.mjs), so
+ * 1600 clears both with margin. Too short and a peek freezes half-painted
+ * until the next step, which at 1/1 is two seconds away.
+ */
+const ANIM_TAIL_MS = 1600;
+let lastInputMs = -1e9;
+let drawnHead = -2;          /* -2 so the first frame always differs */
+let drawnUiRaw = null;
+let paintedHead = -2;
+let paintedUiRaw = null;
+
+/* An input happened: redraw now, and keep redrawing while whatever it started
+ * animates. The two facts always move together, so they move in one place. */
+function markInput() {
+    needsRedraw = true;
+    lastInputMs = Date.now();
+}
+
+/*
  * SHIFT IS READ, NOT WATCHED.
  *
  * This tracked CC 49 from onMidiMessageInternal, and the shim does not forward
@@ -666,20 +697,20 @@ function ledFor(u, i, head) {
  * refuses a write when the buffer is full and setLED then caches -1 so the
  * next pass retries -- pacing on that is cheaper than discovering it.
  */
-function paintPads(u) {
+function paintPads(u, head) {
     if (!u) return;
 
     /*
-     * Resolved ONCE per frame, not per pad: it reads a clock, and asking it 32
-     * times could straddle a step boundary and light two heads in one pass.
+     * THE 32-PAD SWEEP ONLY RUNS WHEN SOMETHING COULD HAVE CHANGED.
      *
-     * The playhead costs TWO packets when it moves and none when it does not
-     * -- setLED caches, so the 32-pad loop below sends only what changed. Past
-     * about 44 steps/sec (1/64 at a fast tempo) the head SKIPS steps rather
-     * than lagging, because the tick rate is the ceiling. That is correct and
-     * is not a dropped frame.
+     * setLED caches, so an unchanged pad already costs no packet -- but it is
+     * still 32 calls a frame, and the only two things that can change a pad
+     * are the pattern (the `ui` string) and the playhead. Below, the ONE
+     * forced heal pad runs every frame regardless: repairing a Move clobber
+     * is the entire reason it is forced, and pacing it to the step rate would
+     * leave a stuck LED visible for a whole step.
      */
-    const head = playheadStep(u);
+    const changed = (head !== paintedHead) || (uiCache.raw !== paintedUiRaw);
 
     if (!padsPainted) {
         const end = Math.min(ledPaintCursor + LED_PER_FRAME, PAD_COUNT);
@@ -691,7 +722,11 @@ function paintPads(u) {
         return;
     }
 
-    for (let i = 0; i < PAD_COUNT; i++) setLED(stepToNote(i), ledFor(u, i, head));
+    if (changed) {
+        for (let i = 0; i < PAD_COUNT; i++) setLED(stepToNote(i), ledFor(u, i, head));
+        paintedHead = head;
+        paintedUiRaw = uiCache.raw;
+    }
 
     setLED(stepToNote(ledHealCursor), ledFor(u, ledHealCursor, head), true);
     ledHealCursor = (ledHealCursor + 1) % PAD_COUNT;
@@ -750,7 +785,7 @@ function onPadPress(note) {
         else                     { u.steps |=  bit; u.ties |=  bit; }
         u.cursor = i;
     }
-    needsRedraw = true;
+    markInput();
     return true;
 }
 
@@ -855,6 +890,27 @@ function init() {
     buildController();
 }
 
+/* ~0.7 s at the ~44 Hz tick. See the call site for why this is not per-tick. */
+const CONTRACT_TICKS = 32;
+let contractTick = 0;
+
+function shouldRedraw(head) {
+    if (needsRedraw) return true;                              /* an input */
+    /*
+     * `>= 0` is not paranoia. A NEGATIVE elapsed time is trivially below the
+     * tail, so a clock that has moved backwards since the last input pins the
+     * tail open forever and the gate degrades silently to "redraw every
+     * frame" -- the exact cost this exists to avoid, with nothing on screen
+     * to say so. Backwards means "we cannot date the last input", which is
+     * not a reason to keep animating.
+     */
+    const since = Date.now() - lastInputMs;
+    if (since >= 0 && since < ANIM_TAIL_MS) return true;       /* its animation */
+    if (head !== drawnHead) return true;                       /* the playhead */
+    if (uiCache.raw !== drawnUiRaw) return true;               /* the pattern */
+    return false;
+}
+
 function tick() {
     /* RESTATED every frame, never edged: the shim drops pad_block unilaterally
      * on the display-mode edge and at init, so a JS mirror of it latches and
@@ -864,7 +920,20 @@ function tick() {
 
     if (!ctl) return;
 
-    ctl.reloadIfChanged();
+    /*
+     * NOT EVERY TICK, AND IT IS NOT A CHEAP GUARD.
+     *
+     * reloadIfChanged reads `chain_params` over IPC (~2.8 ms) and runs a
+     * whole planPages() BEFORE it can compare fingerprints and decide nothing
+     * changed -- page_controller.mjs does the work first and the early-out
+     * afterwards. Calling it every frame was this module's single largest
+     * cost, spent ~44 times a second on a contract that is a string literal in
+     * trance_gate.c and cannot change while the module is loaded.
+     *
+     * On an interval a genuine change is still picked up, within about two
+     * thirds of a second of anyone being able to notice.
+     */
+    if ((contractTick++ % CONTRACT_TICKS) === 0) ctl.reloadIfChanged();
     ctl.tick();              /* exactly one param read */
     landOnRing();            /* no-op once it has succeeded */
 
@@ -872,7 +941,13 @@ function tick() {
      * cannot disagree -- and kept current off the ring page too. */
     refreshUiOffRing();
     const u = uiCache.parsed;
-    paintPads(u);
+    /*
+     * Resolved ONCE per frame, not per consumer: it reads a clock, and asking
+     * twice could straddle a step boundary and leave the pads and the screen
+     * disagreeing about where the playhead is.
+     */
+    const head = playheadStep(u);
+    paintPads(u, head);
 
     /*
      * The cursor moved, so re-read what depends on it. revalue() flushes any
@@ -887,9 +962,17 @@ function tick() {
         ctl.revalue();
     }
 
-    /* The ring animates, so it cannot wait for an input to ask for a repaint.
-     * Everything else is cheap enough that redrawing with it costs nothing we
-     * would otherwise save. */
+    /*
+     * THE RING ANIMATES, so it cannot wait for an input to ask for a repaint
+     * -- but it advances at the STEP rate, not the frame rate, and painting
+     * the same picture in between was pure cost. Four things earn a frame:
+     * an input, the tail of whatever that input animates, the playhead moving
+     * on, and the pattern itself changing under us.
+     */
+    if (!shouldRedraw(head)) return;
+    drawnHead = head;
+    drawnUiRaw = uiCache.raw;
+
     const ctx = movy();
     clear_screen();                       /* the frame is OURS, not the library's */
     ctl.render(ctx, { title: "Trance Gate" });
@@ -920,7 +1003,7 @@ function onMidiMessageInternal(data) {
     if (!intent) return;
 
     const todo = applyInput(ctl, intent, { nowMs: Date.now() });
-    if (!todo) { needsRedraw = true; return; }
+    if (!todo) { markInput(); return; }
 
     if (todo.action === "menu" && todo.entry && todo.entry.action) {
         /* The controller never performs an action -- what "Save" means is the
@@ -943,7 +1026,7 @@ function onMidiMessageInternal(data) {
      * would be the only way to make this worse.
      */
 
-    needsRedraw = true;
+    markInput();
 }
 
 /* Back is offered to us first. Consume it only while there is somewhere to go

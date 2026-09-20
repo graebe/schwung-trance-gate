@@ -56,6 +56,37 @@ static double run_dc(audio_fx_api_v2_t *api, void *inst, int frames, int16_t dc)
     return acc / (double)frames;
 }
 
+/*
+ * The LARGEST ONE-SAMPLE JUMP in the output, as a fraction of the DC fed in.
+ *
+ * This is the shape of a click, and it is the only shape that catches one: an
+ * envelope that restarts from zero still REACHES 1.0 and still takes exactly
+ * attack_ms to get there, so every test phrased as "does it arrive" passed
+ * throughout -- while the gain went 1.000 -> 0.000 in a single sample at every
+ * boundary between two adjacent ON steps.
+ */
+static double run_max_jump(audio_fx_api_v2_t *api, void *inst, int frames, int16_t dc) {
+    int16_t buf[128 * 2];
+    double worst = 0.0, prev = -1.0;
+    int done = 0;
+    while (done < frames) {
+        int n = (frames - done) > 128 ? 128 : (frames - done);
+        for (int i = 0; i < n; i++) { buf[i * 2] = dc; buf[i * 2 + 1] = dc; }
+        api->process_block(inst, buf, n);
+        for (int i = 0; i < n; i++) {
+            double v = (double)buf[i * 2];
+            if (prev >= 0.0) {
+                double d = fabs(v - prev) / (double)dc;
+                if (d > worst) worst = d;
+            }
+            prev = v;
+        }
+        if (g_beats >= 0.0) g_beats += (n / SR) * (g_bpm / 60.0);
+        done += n;
+    }
+    return worst;
+}
+
 static void set(audio_fx_api_v2_t *api, void *inst, const char *k, const char *v) {
     api->set_param(inst, k, v);
 }
@@ -197,9 +228,103 @@ int main(void) {
     run_dc(api, inst, (int)step_samples, 10000);
     double tied = run_dc(api, inst, 1000, 10000);
 
-    check("untied step 1 restarts the attack (dips)", untied < 4000.0);
+    /*
+     * AT SUSTAIN 100% A TIE CHANGES NOTHING, and that is now correct rather
+     * than a missing feature. Attack ramps FROM the current level, so an
+     * untied ON step arriving on a gate that is already fully open has
+     * nowhere to ramp: it stays open, exactly as the tied one does. These two
+     * used to differ only because the untied one fell to silence first --
+     * which was the click. The tie earns its keep at sustain < 100%, tested
+     * directly below.
+     */
     check("tied step 1 does NOT retrigger (stays open)", tied > 9500.0);
-    check("the tie is the whole difference", tied > untied * 2.0);
+    check("untied step 1 no longer drops out at sustain 100%", untied > 9500.0);
+    api->destroy_instance(inst);
+
+    /* --- no clicks ------------------------------------------------------- */
+    /*
+     * THE REPORTED BUG, AS AN ASSERTION.
+     *
+     * A run of adjacent ON steps stepped the gain 1.000 -> 0.000 in ONE
+     * SAMPLE at every boundary, because ATTACK restarted from silence
+     * wherever the envelope happened to be. RELEASE had captured rel_from
+     * since the beginning; attack had no equivalent, and the asymmetry was
+     * the whole defect.
+     *
+     * Bounded by the attack ramp's OWN slope: over a 50 ms attack the gate
+     * may move at most 1/2205 of full scale per sample, so anything above a
+     * few thousandths is a discontinuity rather than a ramp. Deliberately not
+     * "the envelope reaches 1.0" -- that was true throughout.
+     */
+    printf("no clicks:\n");
+    inst = api->create_instance(NULL, NULL);
+    set(api, inst, "attack", "50");  set(api, inst, "decay", "0");
+    set(api, inst, "sustain", "1");  set(api, inst, "release", "0");
+    set_length(api, inst, 16);  set(api, inst, "amount", "1");
+    set(api, inst, "depth", "1");
+    set(api, inst, "pattern", "FFFF");   /* all 16 steps ON, none tied */
+    set(api, inst, "ties", "0");
+    g_beats = 0.0;
+    run_dc(api, inst, 256, 10000);                       /* anchor + settle */
+    double jump = run_max_jump(api, inst, (int)(step_samples * 4), 10000);
+    check("adjacent ON steps never step the gain", jump < 0.02);
+
+    /* The chop must SURVIVE the fix: a gap still takes the gate to silence,
+     * so alternating on/off is as deep as it ever was. */
+    set(api, inst, "pattern", "5555");   /* on/off/on/off */
+    set(api, inst, "release", "0");
+    g_beats = 0.0;
+    run_dc(api, inst, 256, 10000);
+    double gap = run_dc(api, inst, (int)(step_samples * 4), 10000);
+    check("a gap still silences, so the chop survives", gap < 6500.0 && gap > 1000.0);
+    api->destroy_instance(inst);
+
+    /*
+     * AND THE TIE STILL MEANS SOMETHING -- at sustain < 100%, which is where
+     * there is a difference left to mean. Untied, the step re-articulates
+     * from the sustain level back up; tied, it holds at sustain.
+     */
+    inst = api->create_instance(NULL, NULL);
+    set(api, inst, "attack", "50");   set(api, inst, "decay", "1");
+    set(api, inst, "sustain", "0.3"); set(api, inst, "release", "0");
+    set_length(api, inst, 16);  set(api, inst, "amount", "1");
+    set(api, inst, "depth", "1");
+    set(api, inst, "pattern", "3");  set(api, inst, "ties", "0");
+    g_beats = 0.0;
+    run_dc(api, inst, (int)step_samples, 10000);
+    double untied_s = run_dc(api, inst, 1000, 10000);
+    api->destroy_instance(inst);
+
+    inst = api->create_instance(NULL, NULL);
+    set(api, inst, "attack", "50");   set(api, inst, "decay", "1");
+    set(api, inst, "sustain", "0.3"); set(api, inst, "release", "0");
+    set_length(api, inst, 16);  set(api, inst, "amount", "1");
+    set(api, inst, "depth", "1");
+    set(api, inst, "pattern", "3");  set(api, inst, "ties", "1");
+    g_beats = 0.0;
+    run_dc(api, inst, (int)step_samples, 10000);
+    double tied_s = run_dc(api, inst, 1000, 10000);
+
+    check("untied re-articulates above sustain", untied_s > 3300.0);
+    check("tied holds at sustain", tied_s > 2700.0 && tied_s < 3300.0);
+    check("the tie is still the whole difference", untied_s > tied_s * 1.15);
+
+    /* Attack from a non-zero level still ARRIVES, and in its own time. */
+    run_dc(api, inst, (int)step_samples, 10000);
+    api->destroy_instance(inst);
+
+    inst = api->create_instance(NULL, NULL);
+    set(api, inst, "attack", "50");   set(api, inst, "decay", "0");
+    set(api, inst, "sustain", "1");   set(api, inst, "release", "0");
+    set_length(api, inst, 16);  set(api, inst, "amount", "1");
+    set(api, inst, "depth", "1");
+    set(api, inst, "pattern", "2");  /* step 0 OFF, step 1 ON: a true 0 start */
+    set(api, inst, "ties", "0");
+    g_beats = 0.0;
+    run_dc(api, inst, (int)step_samples, 10000);          /* the gap */
+    run_dc(api, inst, (int)(0.050 * SR) + 64, 10000);     /* the whole attack */
+    double arrived = run_dc(api, inst, 500, 10000);
+    check("attack from silence still reaches full open", arrived > 9900.0);
     api->destroy_instance(inst);
 
     /* --- bar alignment --------------------------------------------------- */
