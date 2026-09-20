@@ -152,7 +152,6 @@ typedef struct tg_instance {
     float amount;
     int   stopped_mode;
     int   cursor;         /* edit position on the ring, 0..length-1 */
-    uint32_t rng;         /* xorshift state; see tg_random_pattern */
 
     /* Runtime. Not saved. */
     double step_pos;      /* absolute fractional step position */
@@ -311,77 +310,6 @@ static void on_step_boundary(tg_instance_t *in, const tg_pattern_t *p,
     }
 }
 
-/* ----------------------------------------------------------- randomise -- */
-
-/*
- * xorshift32. `rand()` is not realtime-safe -- it touches process-global state
- * and glibc's is not guaranteed lock-free -- and every entry point here runs
- * on the audio callback, `set_param` included. This is three instructions and
- * per-instance.
- */
-static inline uint32_t tg_rand(tg_instance_t *in) {
-    uint32_t x = in->rng;
-    x ^= x << 13; x ^= x >> 17; x ^= x << 5;
-    in->rng = x ? x : 1u;
-    return in->rng;
-}
-
-/*
- * A EUCLIDEAN pattern, not coin flips.
- *
- * Uniform random over 16 steps reads as noise: it clumps, it leaves dead bars,
- * and about a third of the time it puts nothing on the downbeat. Spreading k
- * pulses as evenly as possible over n steps is the thing that sounds
- * deliberate, and it is one line of Bresenham -- step i is on when
- * (i*k) mod n < k.
- *
- * What is actually randomised is therefore the MUSICAL choices: how dense, how
- * far rotated, and which of the hits are held. The shape is always playable.
- *
- * Bounded by construction: one pass over at most 32 steps, no allocation.
- */
-static void tg_random_pattern(tg_instance_t *in) {
-    tg_pattern_t *p = &in->pat[in->slot];
-    int n = p->length;
-    if (n < 1) n = 1;
-    if (n > TG_MAX_STEPS) n = TG_MAX_STEPS;
-
-    /* Density between a third and three-quarters. Below that a gate stops
-     * sounding like one; above it there is barely a gap left to hear. */
-    int lo = (n / 3) < 1 ? 1 : (n / 3);
-    int hi = (n * 3) / 4;
-    if (hi < lo) hi = lo;
-    int k = lo + (int)(tg_rand(in) % (uint32_t)(hi - lo + 1));
-
-    int rot = (int)(tg_rand(in) % (uint32_t)n);
-
-    uint32_t steps = 0, ties = 0;
-    for (int i = 0; i < n; i++) {
-        if ((int)(((long)i * k) % n) < k) steps |= (1u << ((i + rot) % n));
-    }
-
-    /* The downbeat is on. A trance gate that does not start the bar reads as a
-     * mistake however even the rest of it is. */
-    steps |= 1u;
-
-    for (int i = 0; i < n; i++) {
-        uint32_t bit = 1u << i;
-        if (!(steps & bit)) continue;
-        /* A tie only means something into another ON step; roughly one in
-         * four, so the pattern breathes without smearing into one long note. */
-        if ((steps & (1u << ((i + 1) % n))) && (tg_rand(in) % 4u) == 0u) ties |= bit;
-        /* Accents: mostly full, sometimes backed off. Never to silence -- that
-         * is what turning the step Off is for, and a 0-depth ON step is an
-         * invisible gap in the ring. */
-        uint32_t r = tg_rand(in) % 100u;
-        p->depth[i] = (r < 70u) ? TG_DEPTH_FULL : (uint8_t)(140 + (r % 90u));
-    }
-    for (int i = n; i < TG_MAX_STEPS; i++) p->depth[i] = TG_DEPTH_FULL;
-
-    p->steps = steps;
-    p->ties = ties;
-}
-
 /* ---------------------------------------------------------------- audio -- */
 
 /*
@@ -510,9 +438,28 @@ static void v2_process_block(void *instance, int16_t *audio_inout, int frames) {
          * you ride the global amount, which is what makes it an accent rather
          * than a second master.
          */
-        /* Per-step wet scales the global wet; one multiply, one meaning. */
-        float sd = (float)p->depth[step] * (1.0f / 255.0f);
-        float m = 1.0f - (in->amount * sd) * (1.0f - in->env);
+        /*
+         * THE STEP'S AMOUNT IS HOW FAR THE GATE OPENS, NOT HOW FAR IT CLOSES.
+         *
+         * It used to scale the CLOSING: `1 - amount*level*(1-env)`. That reads
+         * backwards at both ends. A level of 0 meant "this step is not gated",
+         * so the audio passed at full -- setting a step to 0% made it LOUD --
+         * and on a step that was on it did nothing at all, because a fully
+         * open gate has nothing to close. Reported exactly that way: amount at
+         * 0% and the step still sounding.
+         *
+         * The envelope is a gate opening 0..1, so a step's level is simply how
+         * far it is allowed to open:
+         *
+         *     m = 1 - amount * (1 - env * level)
+         *
+         * level 1 is unchanged from before, level 0.5 is half as loud, level 0
+         * is silent, and an OFF step is a gap whatever its level -- env is 0
+         * there, so the term vanishes, which is right: a gap has no loudness.
+         * The global `amount` still scales the whole effect as the dry/wet.
+         */
+        float level = (float)p->depth[step] * (1.0f / 255.0f);
+        float m = 1.0f - in->amount * (1.0f - in->env * level);
 
         float l = (float)audio_inout[i * 2]     * m;
         float r = (float)audio_inout[i * 2 + 1] * m;
@@ -553,9 +500,6 @@ static void *v2_create_instance(const char *module_dir, const char *config_json)
 
     in->last_step = -1;
     in->env_stage = TG_IDLE;
-    /* Any non-zero seed; the pointer gives two instances different streams so
-     * two Trance Gates in one chain do not randomise identically. */
-    in->rng = (uint32_t)(uintptr_t)in | 1u;
     return in;
 }
 
@@ -583,7 +527,9 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
             if (in->cursor < 0) in->cursor = 0;
         }
     } else if (strcmp(key, "length") == 0) {
-        int n = atoi(val);
+        /* Option INDEX, as for `cursor`: index 15 is the option named "16",
+         * which is a length of 16. */
+        int n = atoi(val) + 1;
         p->length = n < 1 ? 1 : (n > TG_MAX_STEPS ? TG_MAX_STEPS : n);
         /* A cursor left beyond the new end would edit a step the ring does not
          * draw -- an invisible write. */
@@ -606,11 +552,23 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
         in->stopped_mode = (strcmp(val, "Free") == 0 || atoi(val) == 1)
                          ? TG_STOPPED_FREE : TG_STOPPED_OPEN;
     } else if (strcmp(key, "cursor") == 0) {
-        /* 1-BASED ON THE WIRE, 0-based inside. The knob reads "3" for the
-         * third step because that is what the ring is numbered, and get_param
-         * must answer in the same units it accepts or the first detent after a
-         * read would jump by one. */
-        int c = atoi(val) - 1;
+        /*
+         * THE WIRE CARRIES THE OPTION INDEX, and the option NAMES carry the
+         * step numbers -- so index 15 displays as "16".
+         *
+         * It used to send the 1-based name with `options_as_string`, which is
+         * the other legal convention, and it displayed one too high: the host
+         * has three resolvers for an enum's wire format and only two of them
+         * consult that flag. formatParamValue treats the raw as an index
+         * unconditionally, so a name of "16" was rendered as options[16] --
+         * "17". Reported as the length knob reading 17 for a 16-step pattern.
+         *
+         * Indices are the host's default convention ("A NUMBER IS AN INDEX"),
+         * so speaking them makes all three agree without depending on the
+         * flag. It also makes this key agree with the `ui` readout, which was
+         * already 0-based.
+         */
+        int c = atoi(val);
         if (c < 0) c = 0;
         if (c >= p->length) c = p->length - 1;
         in->cursor = c;
@@ -641,11 +599,6 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
             float f = clampf((float)atof(val), 0.0f, 1.0f);
             p->depth[c] = (uint8_t)(f * 255.0f + 0.5f);
         }
-    } else if (strcmp(key, "random") == 0) {
-        /* A WRITE-ONLY trigger: the host fires it on a click and a knob cannot
-         * edit it. Regenerating must not touch step_pos -- resetting the phase
-         * here would throw the gate out of time on every press. */
-        tg_random_pattern(in);
     } else if (strcmp(key, "pattern") == 0) {
         set_pattern_hex(&p->steps, val);
     } else if (strcmp(key, "ties") == 0) {
@@ -759,7 +712,7 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
 
     if (strcmp(key, "name") == 0)    return snprintf(buf, buf_len, "TRANCE GATE");
     if (strcmp(key, "slot") == 0)    return snprintf(buf, buf_len, "%d", in->slot + 1);
-    if (strcmp(key, "length") == 0)  return snprintf(buf, buf_len, "%d", p->length);
+    if (strcmp(key, "length") == 0)  return snprintf(buf, buf_len, "%d", p->length - 1);
     if (strcmp(key, "rate") == 0)    return snprintf(buf, buf_len, "%s", tg_rates[in->rate_idx].label);
     if (strcmp(key, "attack") == 0)  return snprintf(buf, buf_len, "%.1f", in->attack_ms);
     if (strcmp(key, "decay") == 0)   return snprintf(buf, buf_len, "%.1f", in->decay_ms);
@@ -769,7 +722,7 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
     if (strcmp(key, "amount") == 0)  return snprintf(buf, buf_len, "%.2f", in->amount);
     if (strcmp(key, "stopped") == 0) return snprintf(buf, buf_len, "%s",
                                         in->stopped_mode == TG_STOPPED_FREE ? "Free" : "Open");
-    if (strcmp(key, "cursor") == 0) return snprintf(buf, buf_len, "%d", in->cursor + 1);
+    if (strcmp(key, "cursor") == 0) return snprintf(buf, buf_len, "%d", in->cursor);
     if (strcmp(key, "step") == 0) {
         uint32_t bit = 1u << in->cursor;
         const char *w = !(p->steps & bit) ? "Off" : ((p->ties & bit) ? "Tie" : "On");
@@ -777,9 +730,6 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
     }
     if (strcmp(key, "step_amount") == 0)
         return snprintf(buf, buf_len, "%.2f", p->depth[in->cursor] * (1.0f / 255.0f));
-    /* A trigger has no state to report; the host only needs a stable reading
-     * for the cell it draws. */
-    if (strcmp(key, "random") == 0) return snprintf(buf, buf_len, "Go");
     if (strcmp(key, "pattern") == 0) return snprintf(buf, buf_len, "%X", p->steps);
     if (strcmp(key, "ties") == 0)    return snprintf(buf, buf_len, "%X", p->ties);
 
@@ -884,25 +834,35 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
          * silently. */
         static const char *params =
         "["
+        /*
+         * `options_as_string` because this one speaks NAMES -- get answers
+         * `slot + 1`, set does `atoi(val) - 1` -- while `length` and `cursor`
+         * below speak INDICES off an option list that looks identical.
+         *
+         * Two numeral enums, opposite conventions, and NEITHER can be worked
+         * out from a value: every index that is at least 1 is also one of the
+         * option names, so "1" is both slot 0 by name and slot 1 by number.
+         * The host's learner used to guess (name first) and was right here by
+         * luck and wrong on `length`, which is how a 16-step pattern came to
+         * read 15 and write 17. It refuses to guess now, so an ambiguous enum
+         * that does not declare is read as an index -- which is correct for
+         * the two below and would silently shift this one by a slot.
+         */
         "{\"key\":\"slot\",\"name\":\"Slot\",\"type\":\"enum\","
+          "\"options_as_string\":true,"
           "\"options\":[\"1\",\"2\",\"3\",\"4\",\"5\",\"6\",\"7\",\"8\"],\"default\":\"1\"},"
         /* Knob 3: this step's amount -- an accent, scaled by the global
          * Amount on the settings page. Same quantity, two scopes, which is why
          * they share a name, a unit and a range. */
-        "{\"key\":\"step_amount\",\"name\":\"Amount\",\"short_name\":\"Amnt\",\"type\":\"float\",\"min\":0,\"max\":1,"
+        "{\"key\":\"step_amount\",\"name\":\"Step Amount\",\"short_name\":\"Step\",\"type\":\"float\",\"min\":0,\"max\":1,"
           "\"default\":1,\"step\":0.01,\"unit\":\"%\"},"
-        /* Knob 4: regenerate. `access: "write"` is what makes it a TRIGGER --
-         * a click fires it and the encoder cannot edit it, so it cannot be
-         * nudged into firing while you are reaching for the knob beside it. */
-        "{\"key\":\"random\",\"name\":\"Rnd\",\"type\":\"enum\","
-          "\"options\":[\"Go\"],\"access\":\"write\",\"default\":\"Go\"},"
         /* Same reasoning as `cursor`: 32 values at one detent each is a flick
          * from end to end. */
-        "{\"key\":\"length\",\"name\":\"Len\",\"type\":\"enum\",\"options_as_string\":true,"
+        "{\"key\":\"length\",\"name\":\"Len\",\"type\":\"enum\","
           "\"options\":[\"1\",\"2\",\"3\",\"4\",\"5\",\"6\",\"7\",\"8\",\"9\",\"10\","
            "\"11\",\"12\",\"13\",\"14\",\"15\",\"16\",\"17\",\"18\",\"19\",\"20\","
            "\"21\",\"22\",\"23\",\"24\",\"25\",\"26\",\"27\",\"28\",\"29\",\"30\","
-           "\"31\",\"32\"],\"default\":\"16\"},"
+           "\"31\",\"32\"],\"wire_format\":\"index\",\"default\":\"15\"},"
         /* A PLAIN ENUM, NOT type "rate".
          *
          * `rate` is expanded into its option list by buildRateParamMeta in
@@ -930,16 +890,16 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
          * whatever its length, which is the feel we want and the house
          * constant rather than a number invented here.
          *
-         * `options_as_string` is LOAD-BEARING: the options are numerals, so
-         * "3" is both the name of option 3 and the index of option 3, and
-         * nothing in the value can settle it. Without the override the host
-         * reads it as an index and every step is off by one.
+         * The options are numerals, so a value is ambiguous between a name
+         * and an index -- and the host's THREE enum resolvers do not agree
+         * about which to prefer. Speaking the index is what they all read the
+         * same way; see the note in set_param.
          */
-        "{\"key\":\"cursor\",\"name\":\"Step\",\"type\":\"enum\",\"options_as_string\":true,"
+        "{\"key\":\"cursor\",\"name\":\"Step\",\"type\":\"enum\","
           "\"options\":[\"1\",\"2\",\"3\",\"4\",\"5\",\"6\",\"7\",\"8\",\"9\",\"10\","
            "\"11\",\"12\",\"13\",\"14\",\"15\",\"16\",\"17\",\"18\",\"19\",\"20\","
            "\"21\",\"22\",\"23\",\"24\",\"25\",\"26\",\"27\",\"28\",\"29\",\"30\","
-           "\"31\",\"32\"],\"default\":\"1\"},"
+           "\"31\",\"32\"],\"wire_format\":\"index\",\"default\":\"0\"},"
         /* Knob 2: what the step under the cursor IS. Three states, not a
          * switch plus a tie switch -- see set_param. */
         "{\"key\":\"step\",\"name\":\"Gate\",\"short_name\":\"Gate\",\"type\":\"enum\","
@@ -958,16 +918,25 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         "{\"key\":\"release\",\"name\":\"Rel\",\"type\":\"float\",\"min\":0,\"max\":500,"
           "\"default\":20,\"step\":1,\"unit\":\"ms\","
           "\"viz\":{\"group\":\"adsr\",\"role\":\"release\"}},"
-        /* THE SAME WORD AS THE PER-STEP ONE, DELIBERATELY. They are the same
-         * quantity at two scopes -- the step's amount scales this one -- and
-         * calling them different things (Level, Depth, Mix) is what made three
-         * controls out of one. Shown 0-100%: `unit: "%"` with max 1 is what
-         * makes the formatter scale it. */
+        /*
+         * THE SAME WORD, AND THE SCOPE IN FRONT OF IT.
+         *
+         * These are one quantity at two scopes, so they share the word -- but
+         * naming them identically made them indistinguishable on the grid, and
+         * the per-step one was turned to zero expecting the whole effect to
+         * bypass. It only silenced one step, which is what it is for. "Step"
+         * and "All" say which you are holding; the shared "Amount" still says
+         * they are the same idea.
+         *
+         * Shown 0-100%: `unit: "%"` with max 1 is what makes the formatter
+         * scale it. Zero here is a true bypass -- see the gain in
+         * process_block.
+         */
         /* Gate length. Sustain is a LEVEL and has none; this is the duration
          * control, expressed as a share of the step so it follows the Rate. */
         "{\"key\":\"hold\",\"name\":\"Gate\",\"short_name\":\"Gate\",\"type\":\"float\","
           "\"min\":0.05,\"max\":1,\"default\":1,\"step\":0.01,\"unit\":\"%\"},"
-        "{\"key\":\"amount\",\"name\":\"Amount\",\"short_name\":\"Amnt\",\"type\":\"float\",\"min\":0,\"max\":1,"
+        "{\"key\":\"amount\",\"name\":\"All Amount\",\"short_name\":\"All\",\"type\":\"float\",\"min\":0,\"max\":1,"
           "\"default\":1,\"step\":0.01,\"unit\":\"%\"},"
         "{\"key\":\"pattern\",\"name\":\"Pat\",\"type\":\"string\",\"access\":\"read\"},"
         "{\"key\":\"ties\",\"name\":\"Ties\",\"type\":\"string\",\"access\":\"read\"},"
@@ -983,7 +952,18 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
          * is what makes it impossible for the picture to collide with the
          * text: the drawer is handed a frame, not the screen. */
         "{\"key\":\"gate\",\"name\":\"Gate\",\"type\":\"canvas\",\"as_page\":true,"
-          "\"show_value\":false,\"extra_keys\":[\"ui\"]}"
+          "\"show_value\":false,\"extra_keys\":[\"ui\"],"
+          /* THE RING PAGE'S OWN KNOBS, which are not the grid's.
+           *
+           * Without this a canvas page takes the level's first eight knobs, so
+           * the picture page and the grid behind it are the SAME EIGHT KEYS and
+           * neither can be arranged without deranging the other. They want
+           * different things: while you are looking at the pattern you reach
+           * for the slot, the two amounts and the envelope; Length and Rate are
+           * settings you leave alone. Those two live on the grid only, and
+           * `slot` and `step_amount` live here only. */
+          "\"page_knobs\":[\"slot\",\"amount\",\"step_amount\","
+            "\"attack\",\"decay\",\"sustain\",\"release\"]}"
         "]";
         int len = (int)strlen(params);
         if (len >= buf_len) return -1;

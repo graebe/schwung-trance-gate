@@ -117,52 +117,36 @@ const HIERARCHY = JSON.stringify({
     modes: null,
     levels: {
         /*
-         * TWO LEVELS, AND THE RING LEADS.
+         * ONE LEVEL, and this list is the CELLS pages only.
          *
-         * A canvas page carries its LEVEL's knobs, and a level with knobs also
-         * emits a cells page for them -- so one level could never hold both the
-         * six pattern controls and the eight envelope/output ones without
-         * spilling into a third grid page anyway. Splitting them is what makes
-         * the pattern page self-contained and hands depth/mix/slot/stopped
-         * their cells back.
+         * The ring page names its own knobs now -- `page_knobs` on the `gate`
+         * canvas param in chain_params -- so the two surfaces no longer have
+         * to agree. They never wanted to: the ring is what you hold while the
+         * pattern plays (slot, the two amounts, the envelope) and the grid is
+         * where the settings live (length, rate, gate length). Before that
+         * field existed a canvas page took the level's first eight knobs, so
+         * removing Length from the picture removed it from the settings too.
          *
-         * `gate` is FIRST in root's params, and the planner now emits a canvas
-         * page ahead of its level's grids when it is declared ahead of every
-         * cell-bearing param. So the ring is page 1 in the bank bar, not just
-         * where the cursor happens to land.
+         *     page 1  Gate      Slot  Amnt  Step  Att  Dec  Sus  Rel
+         *     page 2  Main      Len   Rate  Amnt  Gate | Att Dec Sus Rel
+         *     page 3  Main - 2  Stop
+         *
+         * ORDER IS LOAD-BEARING on page 2: attack/decay/sustain/release occupy
+         * positions 5-8, i.e. row 2 of the 2x4 grid, so alignGroupsToRows has
+         * nothing to reflow. A viz group straddling two rows is dropped WHOLE
+         * and in silence, and that group is the envelope graphic.
+         *
+         * `slot` and `step_amount` are deliberately absent: they are on the
+         * ring page and nowhere else. `cursor` and `step` have no knob at all
+         * -- a pad is the step.
          */
         root: {
             name: "Gate",
             children: null,
-            /*
-             * NO `cursor` AND NO `step` KNOB.
-             *
-             * The pads do both, and better: a pad IS the step, so selecting
-             * one and toggling it is a single press on the thing itself
-             * rather than two encoders spent walking an index. Leaving the
-             * knobs in as a second route meant four of the six were spent on
-             * what the grid already does, and the two surfaces could disagree
-             * for a rotation at a time.
-             *
-             * Both keys keep their chain_params metadata -- the pads write
-             * them, and the ring reads the cursor back out of `ui` -- they
-             * simply have no cell. `step_amount` leads because it is what you
-             * reach for straight after choosing a pad.
-             */
-            knobs: ["step_amount", "random", "length", "rate"],
-            params: ["gate", { level: "settings", label: "Settings" }]
-        },
-        settings: {
-            name: "Settings",
-            children: null,
-            /* attack/decay/sustain/release lead, so they are positions 0-3 --
-             * the TOP ROW, contiguous. A viz group straddling two rows is
-             * dropped whole and in silence, and the envelope graphic is the
-             * point of grouping them. */
-            knobs: ["attack", "decay", "sustain", "release",
-                    "hold", "amount", "slot", "stopped"],
-            params: ["attack", "decay", "sustain", "release",
-                     "hold", "amount", "slot", "stopped"]
+            knobs: ["length", "rate", "amount", "hold",
+                    "attack", "decay", "sustain", "release",
+                    "stopped"],
+            params: ["gate"]
         }
     }
 });
@@ -380,18 +364,23 @@ function drawRing(ctx, o) {
     let amtTxt = "";
     if (rawAmt !== undefined && rawAmt !== null && rawAmt !== "") {
         const n = Number(rawAmt);
-        if (isFinite(n)) amtTxt = Math.round(n * 100) + "%";
+        if (isFinite(n)) amtTxt = "S" + Math.round(n * 100);
     }
 
     const leftW  = Math.max(ctx.textWidth(lenTxt), ctx.textWidth(amtTxt));
-    const rightW = ctx.textWidth(rateTxt);
+    /* The meter shares the right column with the rate, so the column is as
+     * wide as the wider of the two -- otherwise the ring would be centred into
+     * the bar. */
+    const rightW = Math.max(ctx.textWidth(rateTxt), BAR_W);
     const pad = 2;
 
     ctx.print(0, 0, lenTxt, 1);
-    if (rateTxt) ctx.print(Math.max(0, w - rightW), 0, rateTxt, 1);
+    if (rateTxt) ctx.print(Math.max(0, w - ctx.textWidth(rateTxt)), 0, rateTxt, 1);
     /* Bottom-left, under the length: the two numbers that describe the
      * pattern on the left, the one that describes time on the right. */
     if (amtTxt) ctx.print(0, h - 5, amtTxt, 1);
+
+    drawAllAmountMeter(ctx, vals.amount, w, h);
 
     const gapL = leftW + pad;
     const gapR = w - rightW - pad;
@@ -474,6 +463,50 @@ function drawRing(ctx, o) {
     ctx.print(cx - (ctx.textWidth(label) >> 1), cy - 3, label, 1);
 }
 
+/*
+ * THE GLOBAL AMOUNT, AS A METER BESIDE THE RING.
+ *
+ * It is knob 3 on this page and a canvas page draws no cells, so like the step
+ * amount it worked while saying nothing. A number would have been a third
+ * reading to parse in a corner; a filled column is read at a glance and, being
+ * the dry/wet, is the one value where "how full is it" IS the question.
+ *
+ * It lives in the right-hand column under the rate, which the ring already
+ * keeps clear -- the column is widened to the greater of the two so the bar
+ * cannot be drawn over the circle however narrow the rate text gets.
+ *
+ * The frame context has no drawRect, so the border is four fillRects. That is
+ * four bindings rather than one and it is the price of every primitive here
+ * being built on a clipped fillRect.
+ */
+const BAR_W = 5;
+
+function drawAllAmountMeter(ctx, raw, w, h) {
+    const x = w - BAR_W;
+    const top = 7;                       /* clear of the rate text above */
+    const bot = h - 1;
+    if (bot - top < 4) return;           /* too short to read; draw nothing */
+    const height = bot - top + 1;
+
+    /* The border is drawn whatever the value: an empty frame says "this is a
+     * meter and it is at zero", where no frame at all would say nothing. */
+    ctx.fillRect(x, top, BAR_W, 1, 1);
+    ctx.fillRect(x, bot, BAR_W, 1, 1);
+    ctx.fillRect(x, top, 1, height, 1);
+    ctx.fillRect(x + BAR_W - 1, top, 1, height, 1);
+
+    /* A read that has not answered must not become a picture -- an unfilled
+     * bar and a bar we could not read are different things, and only the
+     * border is honest about the second. */
+    if (raw === undefined || raw === null || raw === "") return;
+    const v = Number(raw);
+    if (!isFinite(v)) return;
+
+    const innerH = height - 2;
+    const fill = Math.round(innerH * Math.max(0, Math.min(1, v)));
+    if (fill > 0) ctx.fillRect(x + 1, top + 1 + (innerH - fill), BAR_W - 2, fill, 1);
+}
+
 /* --------------------------------------------------------------- pad LEDs -- */
 
 /*
@@ -533,14 +566,24 @@ function padColour(u, i) {
     const on = (u.steps >> i) & 1;
     const selected = (i === u.cursor);
 
-    /* Three rungs for the amount, and selection borrows the fourth. An absent
+    /*
+     * ONLY AN ON STEP RAMPS. A step's amount is how far the gate OPENS, so on
+     * a gap it changes nothing -- the envelope is shut there and the term
+     * vanishes. Ramping a gap anyway would draw a difference the ear cannot
+     * hear, which is worse than drawing none: it invites you to tune a control
+     * that is doing nothing.
+     *
+     * Three rungs for the level, and selection borrows the fourth. An absent
      * depth means full, never silent -- the same rule the state migration
-     * uses, for the same reason. */
+     * uses, for the same reason.
+     */
+    if (!on) return RED_RAMP[selected ? 2 : 1];
+
     const amount = (u.depths && u.depths[i] !== undefined) ? u.depths[i] : 1;
     let rung = amount >= 0.67 ? 2 : (amount >= 0.34 ? 1 : 0);
     if (selected) rung += 1;
 
-    return (on ? GREEN_RAMP : RED_RAMP)[rung];
+    return GREEN_RAMP[rung];
 }
 
 /*
@@ -598,7 +641,9 @@ function onPadPress(note) {
     if (typeof host_module_set_param !== "function") return true;
 
     /* 1-based on the wire: the cursor is numbered the way the ring is. */
-    host_module_set_param("cursor", String(i + 1));
+    /* The wire carries the option INDEX, which is 0-based and matches the
+     *  readout. See the note in trance_gate.c's set_param. */
+    host_module_set_param("cursor", String(i));
 
     /*
      * PLAIN PRESS IS ON/OFF; SHIFT IS THE TIE.
@@ -852,7 +897,11 @@ function handleBack() {
 
 /* Pure helpers, exported for tests. The host never looks at this. */
 globalThis.chain_ui_test = {
+    /* The page layout is planned from these two together, and the smoke test
+     * runs the HOST'S planner over them rather than restating the answer. */
+    HIERARCHY,
     parseUi,
+    drawRing,
     padColour,
     stepToNote,
     noteToStep,

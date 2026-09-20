@@ -86,7 +86,7 @@ step('a jog turn does not throw', () => ui.onMidiMessageInternal([0xB0, 14, 1]))
 step('a jog click does not throw', () => ui.onMidiMessageInternal([0xB0, 3, 127]));
 step('ticks after input do not throw', () => { for (let i = 0; i < 20; i++) ui.tick(); });
 step('a top-row pad selects the matching step', () => {
-    if (params.cursor !== '5') throw new Error(`cursor=${params.cursor}, expected 5 (1-based)`);
+    if (params.cursor !== '4') throw new Error(`cursor=${params.cursor}, expected index 4`);
     if (!('step' in params)) throw new Error('step never written');
 });
 /*
@@ -220,15 +220,15 @@ step('a louder step is a brighter pad', () => {
     if (quiet === mid || mid === loud)
         throw new Error(`amount ramp collapsed: ${quiet}, ${mid}, ${loud}`);
 });
-step('an off step ramps too, in red', () => {
+step('an off step does NOT ramp -- its level does nothing', () => {
     const u = T.parseUi(mkUi(0x00, 7, [0.0, 0.5, 1.0, 1, 1, 1, 1, 1]));
-    const [quiet, mid, loud] = [T.padColour(u, 0), T.padColour(u, 1), T.padColour(u, 2)];
-    if (quiet === mid || mid === loud)
-        throw new Error(`red ramp collapsed: ${quiet}, ${mid}, ${loud}`);
+    const [a, b, c] = [T.padColour(u, 0), T.padColour(u, 1), T.padColour(u, 2)];
+    if (!(a === b && b === c))
+        throw new Error(`gaps differ by level: ${a}, ${b}, ${c} -- the ear cannot hear that`);
 });
 step('the selected pad is lighter than the same step unselected', () => {
     for (const amt of [0.0, 0.5, 1.0]) {
-        for (const steps of [0xFF, 0x00]) {
+        for (const steps of [0xFF, 0x00]) {   /* on and off both mark selection */
             const depths = new Array(8).fill(amt);
             const off = T.padColour(T.parseUi(mkUi(steps, 7, depths)), 0);  /* cursor elsewhere */
             const on  = T.padColour(T.parseUi(mkUi(steps, 0, depths)), 0);  /* cursor here */
@@ -256,6 +256,163 @@ step('a step past the pattern is dark, whatever its amount', () => {
     const u = T.parseUi(mkUi(0xFF, 0, new Array(8).fill(1)));
     if (T.padColour(u, 8) !== 0) throw new Error('past-the-end pad is not dark');
 });
+
+/*
+ * THE GLOBAL AMOUNT METER. Rendered into a pixel grid rather than asserted on
+ * call counts: the thing that can go wrong is geometric -- a bar drawn over
+ * the ring, or a fill that does not track the value -- and only pixels show
+ * that.
+ */
+const { frameCtx } = await import(SHARED + '/param_pages/frame_ctx.mjs');
+function renderRing(amount, W = 128, Hh = 40) {
+    const px = Array.from({ length: Hh }, () => new Array(W).fill(0));
+    const put = (x, y, v) => {
+        x = Math.round(x); y = Math.round(y);
+        if (x >= 0 && x < W && y >= 0 && y < Hh) px[y][x] = v ? 1 : 0;
+    };
+    const parent = {
+        fillRect: (x, y, w, h, v) => { for (let j = 0; j < h; j++) for (let i = 0; i < w; i++) put(x + i, y + j, v); },
+        print: (x, y, t, v) => { const t2 = String(t); for (let i = 0; i < t2.length; i++) for (let dy = 0; dy < 5; dy++) for (let dx = 0; dx < 3; dx++) put(x + i * 4 + dx, y + dy, v); },
+        textWidth: (t) => String(t).length * 4,
+    };
+    const ctx = frameCtx(parent, { x: 0, y: 0, w: W, h: Hh });
+    const depths = 'FF'.repeat(16);
+    T.drawRing(ctx, {
+        values: { ui: `5555:0:16:3.2:125.00:1:4:` + depths,
+                  rate: "1/16", step_amount: "0.75", amount },
+        nowMs: 0,
+    });
+    return { px, clipped: ctx.clipped(), W, Hh };
+}
+const litInBar = (r) => {
+    let n = 0;
+    for (let y = 0; y < r.Hh; y++) for (let x = r.W - 5; x < r.W; x++) if (r.px[y][x]) n++;
+    return n;
+};
+
+step('the meter draws a border even at zero', () => {
+    const r = renderRing("0");
+    if (litInBar(r) < 20) throw new Error('no border drawn at amount 0');
+});
+step('the fill tracks the value', () => {
+    const [lo, mid, hi] = ["0", "0.5", "1"].map(a => litInBar(renderRing(a)));
+    if (!(lo < mid && mid < hi))
+        throw new Error(`fill does not increase: ${lo}, ${mid}, ${hi}`);
+});
+step('a read that did not answer draws the border and no fill', () => {
+    const empty = litInBar(renderRing(null));
+    const zero  = litInBar(renderRing("0"));
+    if (empty !== zero) throw new Error(`unread ${empty} != zero ${zero}`);
+});
+step('the meter never draws over the ring', () => {
+    /* The ring must not reach the bar's column. Compare a render with the bar
+     * against the columns it occupies: the ring is centred left of them. */
+    const r = renderRing("1");
+    let ringPixelsInBarColumns = 0;
+    for (let y = 0; y < r.Hh; y++) {
+        for (let x = r.W - 5; x < r.W; x++) {
+            /* everything in these columns should belong to the meter, which is
+             * a solid rectangle: so every lit pixel is within its border */
+            if (r.px[y][x] && y < 7) ringPixelsInBarColumns++;   /* above the bar top */
+        }
+    }
+    if (ringPixelsInBarColumns > 20)
+        throw new Error('something other than the rate text is in the meter column');
+});
+step('nothing drawn outside the frame', () => {
+    for (const a of ["0", "0.5", "1"]) {
+        const r = renderRing(a);
+        if (r.clipped !== 0) throw new Error(`amount ${a}: ${r.clipped} pixels clipped`);
+    }
+});
+
+/*
+ * THE PAGE LAYOUT, planned by the HOST'S OWN PLANNER against this module's
+ * real chain_params and its real hierarchy.
+ *
+ * Two things are pinned here and they pull against each other:
+ *
+ *   The ring page and the grid must carry DIFFERENT keys. They are the same
+ *   eight by default -- a canvas page takes the level's first eight knobs --
+ *   and `page_knobs` is what separates them. Lose the declaration and the two
+ *   pages silently collapse back onto one list, which looks like a layout
+ *   preference rather than a bug.
+ *
+ *   attack/decay/sustain/release must stay on ONE ROW of the grid, i.e.
+ *   positions 5-8. alignGroupsToRows reflows a page to keep a viz group
+ *   together and DROPS one it cannot place -- whole, and in silence -- and
+ *   that group is the envelope graphic. `realigned` being empty is the proof
+ *   the authored order already satisfies it and nothing was moved.
+ */
+{
+    const { planPages } = await import(resolve(SHARED, 'param_pages/page_plan.mjs'));
+    const chainParams = JSON.parse(readFileSync(process.env.TG_PARAMS, 'utf8'));
+    const hierarchy = JSON.parse(globalThis.chain_ui_test.HIERARCHY);
+    const r = planPages({ hierarchy, chainParams });
+    const page = (i) => (r.pages[i] ? (r.pages[i].keys || []).join(',') : '<missing>');
+
+    step('page 1 is the ring, with its own knobs', () => {
+        const want = 'slot,amount,step_amount,attack,decay,sustain,release';
+        if (!r.pages[0] || !r.pages[0].canvas) throw new Error('page 1 is not the canvas page');
+        if (page(0) !== want) throw new Error(`got ${page(0)}`);
+    });
+    step('page 2 is the grid, and Len/Rate are only here', () => {
+        const want = 'length,rate,amount,hold,attack,decay,sustain,release';
+        if (page(1) !== want) throw new Error(`got ${page(1)}`);
+    });
+    step('page 3 holds what is left', () => {
+        if (page(2) !== 'stopped') throw new Error(`got ${page(2)}`);
+    });
+    step('the two pages do NOT share a key list', () => {
+        if (page(0) === page(1)) throw new Error('ring and grid collapsed onto one list');
+    });
+    step('the envelope group needed no reflow', () => {
+        if ((r.realigned || []).length) throw new Error(JSON.stringify(r.realigned));
+        if ((r.warnings || []).length) throw new Error(JSON.stringify(r.warnings));
+    });
+    step('every page_knobs key is declared in chain_params', () => {
+        const declared = new Set(chainParams.map((p) => p.key));
+        for (const k of r.pages[0].keys)
+            if (!declared.has(k)) throw new Error(`${k} would be an invented 0..1 float`);
+    });
+}
+
+/*
+ * THE LENGTH WIRE, end to end, through the host's three resolvers AFTER the
+ * learner has seen a device value. This is the exact sequence that shipped a
+ * 16-step pattern reading 15 and writing 17: options ["1".."32"] are numerals,
+ * so every index is also an option name, the learner latched "name" off the
+ * first read, and the latch is permanent and on the SHARED meta object.
+ */
+{
+    const F = await import(resolve(SHARED, 'param_format.mjs'));
+    const M = await import(resolve(SHARED, 'param_pages/param_meta.mjs'));
+    const chainParams = JSON.parse(readFileSync(process.env.TG_PARAMS, 'utf8'));
+    const metaOf = (k) => chainParams.find((p) => p.key === k);
+
+    step('length declares the index convention', () => {
+        if (metaOf('length').wire_format !== 'index') throw new Error('undeclared');
+        if (metaOf('cursor').wire_format !== 'index') throw new Error('cursor undeclared');
+    });
+    step('slot declares the NAME convention (it speaks 1-based)', () => {
+        if (metaOf('slot').options_as_string !== true) throw new Error('undeclared');
+    });
+    step('a 16-step pattern reads 16 after the learner has run', () => {
+        const meta = metaOf('length');
+        F.learnEnumWireFormat(meta, '15');            /* what the device reports */
+        const shown = F.formatParamValue('15', meta);
+        if (shown !== '16') throw new Error(`displays ${JSON.stringify(shown)}`);
+        if (M.enumIndexOf(meta, '15') !== 15) throw new Error('enumIndexOf disagrees');
+        const wire = F.formatParamForSet(15, meta);
+        if (wire !== '15') throw new Error(`writes ${JSON.stringify(wire)} -> atoi+1 = ${+wire + 1} steps`);
+    });
+    step('slot 1 still reads 1 and writes 1', () => {
+        const meta = metaOf('slot');
+        F.learnEnumWireFormat(meta, '1');
+        if (F.formatParamValue('1', meta) !== '1') throw new Error(F.formatParamValue('1', meta));
+        if (F.formatParamForSet(0, meta) !== '1') throw new Error(F.formatParamForSet(0, meta));
+    });
+}
 
 rmSync(OUT, { recursive: true, force: true });
 console.log(failures ? `\nFAILED (${failures})` : '\nPASS');

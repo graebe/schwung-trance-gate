@@ -60,6 +60,22 @@ static void set(audio_fx_api_v2_t *api, void *inst, const char *k, const char *v
     api->set_param(inst, k, v);
 }
 
+/*
+ * `length` and `cursor` speak the OPTION INDEX, not the number they display --
+ * index 15 is the option named "16". Spelling that out at every call site is
+ * how an off-by-one hides, so the two helpers do the conversion once and the
+ * tests read in steps.
+ */
+static void set_length(audio_fx_api_v2_t *api, void *inst, int steps) {
+    char v[8]; snprintf(v, sizeof(v), "%d", steps - 1);
+    api->set_param(inst, "length", v);
+}
+
+static void set_cursor(audio_fx_api_v2_t *api, void *inst, int step1) {
+    char v[8]; snprintf(v, sizeof(v), "%d", step1 - 1);
+    api->set_param(inst, "cursor", v);
+}
+
 static const char *get(audio_fx_api_v2_t *api, void *inst, const char *k) {
     static char buf[8192];
     buf[0] = '\0';
@@ -119,7 +135,7 @@ int main(void) {
     set(api, inst, "attack", "0");  set(api, inst, "decay", "0");
     set(api, inst, "sustain", "1"); set(api, inst, "release", "0");
     set(api, inst, "pattern", "5555");   /* steps 0,2,4,... on */
-    set(api, inst, "length", "16");
+    set_length(api, inst, 16);
 
     /* One 1/16 step at 120 BPM is 0.25 beats = 0.125 s = 5512.5 samples. */
     g_beats = 0.0;
@@ -140,7 +156,7 @@ int main(void) {
     set(api, inst, "amount", "0.5");
     run_dc(api, inst, 1200, 10000);                /* into step 2 (on) */
     set(api, inst, "pattern", "0");                /* all steps off */
-    api->set_param(inst, "length", "16");
+    set_length(api, inst, 16);
     run_dc(api, inst, 6000, 10000);                /* settle into a closed step */
     lvl = run_dc(api, inst, 4000, 10000);
     check_near("amount 0.5 closes to half level", lvl, 5000.0, 60.0);
@@ -158,7 +174,7 @@ int main(void) {
     set(api, inst, "decay", "0");
     set(api, inst, "sustain", "1");
     set(api, inst, "release", "0");
-    set(api, inst, "length", "16");
+    set_length(api, inst, 16);
     set(api, inst, "amount", "1");
     set(api, inst, "depth", "1");
     set(api, inst, "pattern", "3");     /* steps 0 and 1 both ON */
@@ -172,7 +188,7 @@ int main(void) {
     inst = api->create_instance(NULL, NULL);
     set(api, inst, "attack", "50");  set(api, inst, "decay", "0");
     set(api, inst, "sustain", "1");  set(api, inst, "release", "0");
-    set(api, inst, "length", "16");  set(api, inst, "amount", "1");
+    set_length(api, inst, 16);  set(api, inst, "amount", "1");
     set(api, inst, "depth", "1");
     set(api, inst, "pattern", "3");
     set(api, inst, "ties", "1");        /* step 0 ties INTO step 1 */
@@ -189,7 +205,7 @@ int main(void) {
     /* --- bar alignment --------------------------------------------------- */
     printf("bar alignment:\n");
     inst = api->create_instance(NULL, NULL);
-    set(api, inst, "length", "16");
+    set_length(api, inst, 16);
     set(api, inst, "pattern", "FFFF");
     g_beats = 0.0;
     run_dc(api, inst, 1, 0);                      /* anchor */
@@ -206,7 +222,7 @@ int main(void) {
     inst = api->create_instance(NULL, NULL);
     set(api, inst, "pattern", "DEAD");
     set(api, inst, "ties", "BEEF");
-    set(api, inst, "length", "13");
+    set_length(api, inst, 13);
     set(api, inst, "rate", "1/8T");
     set(api, inst, "attack", "12.5");
     char saved[8192];
@@ -218,7 +234,8 @@ int main(void) {
     set(api, inst, "state", saved);
     check("pattern survives",  strcmp(get(api, inst, "pattern"), "DEAD") == 0);
     check("ties survive",      strcmp(get(api, inst, "ties"), "BEEF") == 0);
-    check("length survives",   strcmp(get(api, inst, "length"), "13") == 0);
+    /* The wire is the option index, so a 13-step pattern reports "12". */
+    check("length survives",   strcmp(get(api, inst, "length"), "12") == 0);
     check("rate survives",     strcmp(get(api, inst, "rate"), "1/8T") == 0);
     check("attack survives",   strcmp(get(api, inst, "attack"), "12.5") == 0);
     api->destroy_instance(inst);
@@ -234,12 +251,12 @@ int main(void) {
     /* --- cursor / step editing ------------------------------------------- */
     printf("cursor and step editing:\n");
     inst = api->create_instance(NULL, NULL);
-    set(api, inst, "length", "16");
+    set_length(api, inst, 16);
     set(api, inst, "pattern", "0");
 
-    set(api, inst, "cursor", "3");                 /* 1-based on the wire */
+    set(api, inst, "cursor", "2");                 /* the option INDEX */
     check("cursor reads back in the units it accepts",
-          strcmp(get(api, inst, "cursor"), "3") == 0);
+          strcmp(get(api, inst, "cursor"), "2") == 0);
     check("a cleared step reads Off", strcmp(get(api, inst, "step"), "Off") == 0);
 
     set(api, inst, "step", "On");
@@ -263,7 +280,7 @@ int main(void) {
 
     /* A cursor past the end would edit a step the ring never draws. */
     set(api, inst, "cursor", "30");
-    set(api, inst, "length", "8");
+    set_length(api, inst, 8);
     check("shortening the pattern pulls the cursor inside it",
           atoi(get(api, inst, "cursor")) <= 8);
     api->destroy_instance(inst);
@@ -271,9 +288,9 @@ int main(void) {
     /* --- the compound UI readout ------------------------------------------ */
     printf("ui readout:\n");
     inst = api->create_instance(NULL, NULL);
-    set(api, inst, "length", "16");
+    set_length(api, inst, 16);
     set(api, inst, "pattern", "5555");
-    set(api, inst, "cursor", "5");
+    set(api, inst, "cursor", "4");
     g_beats = 0.0;
     run_dc(api, inst, 256, 0);
     {
@@ -295,85 +312,74 @@ int main(void) {
     inst = api->create_instance(NULL, NULL);
     set(api, inst, "attack", "0");  set(api, inst, "decay", "0");
     set(api, inst, "sustain", "1"); set(api, inst, "release", "0");
-    set(api, inst, "length", "16"); set(api, inst, "amount", "1");
+    set_length(api, inst, 16); set(api, inst, "amount", "1");
     set(api, inst, "depth", "1");   set(api, inst, "pattern", "FFFF");
     check("a fresh pattern is full depth",
           strcmp(get(api, inst, "step_amount"), "1.00") == 0);
 
     /*
-     * `cursor` IS 1-BASED ON THE WIRE. "2" is the second step, i.e. index 1 --
-     * it is numbered the way the ring is numbered. Writing "1" here and
-     * expecting index 1 is exactly the mistake this comment exists to stop;
-     * it cost a debugging session, and the implementation was right.
+     * `cursor` CARRIES THE OPTION INDEX. "1" is index 1, i.e. the SECOND step
+     * -- the option names supply the step numbers, so index 1 displays as "2".
+     * It was the 1-based name for a while and displayed one too high, because
+     * the host's three enum resolvers disagree about names vs indices; see the
+     * note in trance_gate.c.
      */
-    set(api, inst, "cursor", "2");                 /* -> index 1 */
+    set(api, inst, "cursor", "1");                 /* index 1 */
     set(api, inst, "step_amount", "0.5");
     check("sdepth reads back", strcmp(get(api, inst, "step_amount"), "0.50") == 0);
-    set(api, inst, "cursor", "3");                 /* -> index 2 */
+    set(api, inst, "cursor", "2");                 /* index 2 */
     check("the accent is PER STEP, not global",
           strcmp(get(api, inst, "step_amount"), "1.00") == 0);
 
+    /*
+     * A STEP'S AMOUNT IS HOW LOUD IT IS. One 1/16 step at 120 BPM is 5512
+     * samples, so every window below stays inside one step -- a window that
+     * crosses a boundary averages two and reads as a wrong gain rather than as
+     * a bad measurement.
+     */
     g_beats = 0.0;
-    lvl = run_dc(api, inst, 4000, 10000);          /* inside step 0, full */
+    lvl = run_dc(api, inst, 4000, 10000);          /* step 0, full level */
     check_near("a full step passes everything", lvl, 10000.0, 60.0);
+
     run_dc(api, inst, 2000, 10000);                /* cross into step 1 */
     lvl = run_dc(api, inst, 3000, 10000);
-    /* The gate is OPEN here, and a level says how far a CLOSED gate closes --
-     * it must not attenuate an open one, or it would be a second volume. */
-    check_near("an open gate is unaffected by its level", lvl, 10000.0, 60.0);
+    check_near("a half-level step is half as loud", lvl, 5019.0, 120.0);
 
-    /* One 1/16 step is 5512 samples, so everything below stays inside
-     * 5512..11025 -- a window that crosses a boundary averages two steps and
-     * reads as a wrong gain rather than as a bad measurement. */
-    set(api, inst, "pattern", "FFFD");             /* step index 1 OFF */
+    /* THE REPORTED BUG: amount at zero has to be silence, not full signal. */
+    set(api, inst, "cursor", "1");                 /* index 1 */
+    set(api, inst, "step_amount", "0");
     g_beats = 0.0;
     run_dc(api, inst, 6000, 10000);                /* settle inside step 1 */
-    lvl = run_dc(api, inst, 3000, 10000);          /* 6000..9000, still step 1 */
-    check_near("a half-amount step closes only half way", lvl, 5020.0, 120.0);
+    lvl = run_dc(api, inst, 3000, 10000);
+    check_near("a zero-level step is SILENT, not loud", lvl, 0.0, 60.0);
 
-    /* The global amount scales it: 0.5 step x 0.5 global = a quarter shut. */
+    /* A gap has no loudness: env is zero there, so the level cannot matter. */
+    set(api, inst, "step_amount", "1");
+    set(api, inst, "pattern", "FFFD");             /* step index 1 OFF */
+    g_beats = 0.0;
+    run_dc(api, inst, 6000, 10000);
+    lvl = run_dc(api, inst, 3000, 10000);
+    check_near("an off step is a gap at any level", lvl, 0.0, 60.0);
+    set(api, inst, "cursor", "1");
+    set(api, inst, "step_amount", "0");
+    lvl = run_dc(api, inst, 2000, 10000);
+    check_near("...and still a gap at level zero", lvl, 0.0, 60.0);
+
+    /* The global amount is the dry/wet over the whole thing. Re-anchor first:
+     * the runs above have walked into step 2, which is ON, and measuring there
+     * reads the wrong step rather than the wrong gain. */
     set(api, inst, "amount", "0.5");
     g_beats = 0.0;
-    run_dc(api, inst, 6000, 10000);                /* back inside step 1 */
+    run_dc(api, inst, 6000, 10000);                /* back inside step 1, a gap */
     lvl = run_dc(api, inst, 3000, 10000);
-    check_near("the global amount scales the step's", lvl, 7490.0, 120.0);
-    api->destroy_instance(inst);
+    check_near("global amount 0.5 halves the gating", lvl, 5000.0, 120.0);
 
-    /* --- randomise -------------------------------------------------------- */
-    printf("randomise:\n");
-    inst = api->create_instance(NULL, NULL);
-    set(api, inst, "length", "16");
-    {
-        int distinct = 0, downbeats = 0, inRange = 0;
-        char seen[8][32];
-        for (int t = 0; t < 8; t++) {
-            set(api, inst, "random", "1");
-            const char *pat = get(api, inst, "pattern");
-            strncpy(seen[t], pat, 31); seen[t][31] = 0;
-            unsigned v = (unsigned)strtoul(pat, NULL, 16);
-            if (v & 1u) downbeats++;
-            int bits = 0;
-            for (int b = 0; b < 16; b++) if (v & (1u << b)) bits++;
-            if (bits >= 4 && bits <= 13) inRange++;
-        }
-        for (int a = 0; a < 8; a++) {
-            int uniq = 1;
-            for (int b = 0; b < a; b++) if (strcmp(seen[a], seen[b]) == 0) uniq = 0;
-            distinct += uniq;
-        }
-        check("randomise produces varied patterns", distinct >= 4);
-        check("every pattern starts on the downbeat", downbeats == 8);
-        check("density stays musical (never empty, never solid)", inRange == 8);
-    }
-    /* Regenerating must not throw the gate out of time. */
+    /* AND ZERO IS A BYPASS -- the whole point of a dry/wet. */
+    set(api, inst, "amount", "0");
     g_beats = 0.0;
-    run_dc(api, inst, 3000, 0);
-    {
-        double before = atof(get(api, inst, "phase"));
-        set(api, inst, "random", "1");
-        double after = atof(get(api, inst, "phase"));
-        check("randomise does not reset the playhead", after >= before);
-    }
+    run_dc(api, inst, 6000, 10000);
+    lvl = run_dc(api, inst, 3000, 10000);
+    check_near("global amount 0 passes everything through", lvl, 10000.0, 60.0);
     api->destroy_instance(inst);
 
     /* --- v1 -> v2 migration ------------------------------------------------ */
@@ -385,7 +391,7 @@ int main(void) {
     set(api, inst, "state",
         "{\"sv\":1,\"slot\":0,\"rate\":\"1/16\",\"depth\":1.000,\"mix\":1.000,"
         "\"p0\":\"FFFF:0:16\"}");
-    set(api, inst, "cursor", "1");
+    set(api, inst, "cursor", "0");
     check("a v1 blob loads its pattern",
           strcmp(get(api, inst, "pattern"), "FFFF") == 0);
     check("a v1 blob loads at FULL depth, not zero",
@@ -402,8 +408,8 @@ int main(void) {
 
     /* v2 round trip carries the depths. */
     inst = api->create_instance(NULL, NULL);
-    set(api, inst, "length", "16");
-    set(api, inst, "cursor", "4");            /* 1-based: index 3 */
+    set_length(api, inst, 16);
+    set(api, inst, "cursor", "3");            /* index 3 */
     set(api, inst, "step_amount", "0.25");
     strncpy(saved, get(api, inst, "state"), sizeof(saved) - 1);
     saved[sizeof(saved) - 1] = '\0';
@@ -411,10 +417,10 @@ int main(void) {
     api->destroy_instance(inst);
     inst = api->create_instance(NULL, NULL);
     set(api, inst, "state", saved);
-    set(api, inst, "cursor", "4");
+    set(api, inst, "cursor", "3");
     check("per-step depth survives a round trip",
           strcmp(get(api, inst, "step_amount"), "0.25") == 0);
-    set(api, inst, "cursor", "5");
+    set(api, inst, "cursor", "4");
     check("its neighbour is untouched",
           strcmp(get(api, inst, "step_amount"), "1.00") == 0);
     api->destroy_instance(inst);
@@ -422,14 +428,14 @@ int main(void) {
     /* --- B1: the whole depth array must survive a round trip ------------- */
     printf("state: every step, not just the early ones:\n");
     inst = api->create_instance(NULL, NULL);
-    set(api, inst, "length", "32");
+    set_length(api, inst, 32);
     /* A DISTINCT value per step, so a truncation cannot hide behind a
      * neighbour's. The old char[40] buffer cut this off around step 15 and the
      * rest came back full -- invisibly, because the pattern still looked right
      * and the earlier test happened to check step 4. */
     for (int i = 0; i < 32; i++) {
         char c[8], v[16];
-        snprintf(c, sizeof(c), "%d", i + 1);          /* cursor is 1-based */
+        snprintf(c, sizeof(c), "%d", i);              /* cursor is the index */
         snprintf(v, sizeof(v), "%.2f", 0.20 + i * 0.02);
         set(api, inst, "cursor", c);
         set(api, inst, "step_amount", v);
@@ -444,7 +450,7 @@ int main(void) {
         int wrong = -1;
         for (int i = 0; i < 32; i++) {
             char c[8], want[16];
-            snprintf(c, sizeof(c), "%d", i + 1);
+            snprintf(c, sizeof(c), "%d", i);
             snprintf(want, sizeof(want), "%.2f", 0.20 + i * 0.02);
             set(api, inst, "cursor", c);
             if (strcmp(get(api, inst, "step_amount"), want) != 0) { wrong = i; break; }
@@ -460,10 +466,10 @@ int main(void) {
     printf("cursor follows the slot:\n");
     inst = api->create_instance(NULL, NULL);
     set(api, inst, "slot", "1");
-    set(api, inst, "length", "32");
+    set_length(api, inst, 32);
     set(api, inst, "cursor", "30");
     set(api, inst, "slot", "2");
-    set(api, inst, "length", "8");
+    set_length(api, inst, 8);
     set(api, inst, "slot", "1");
     set(api, inst, "slot", "2");                  /* back to the short one */
     check("switching to a shorter slot pulls the cursor inside it",
@@ -473,7 +479,7 @@ int main(void) {
     /* --- B4: free-run phase must not grow without bound ------------------- */
     printf("free-run phase:\n");
     inst = api->create_instance(NULL, NULL);
-    set(api, inst, "length", "16");
+    set_length(api, inst, 16);
     set(api, inst, "pattern", "FFFF");
     set(api, inst, "stopped", "Free");
     g_beats = -1.0;                                /* no transport */
@@ -511,7 +517,7 @@ int main(void) {
     inst = api->create_instance(NULL, NULL);
     set(api, inst, "attack", "0");  set(api, inst, "decay", "0");
     set(api, inst, "sustain", "1"); set(api, inst, "release", "0");
-    set(api, inst, "length", "16"); set(api, inst, "amount", "1");
+    set_length(api, inst, 16); set(api, inst, "amount", "1");
     set(api, inst, "pattern", "FFFF");          /* every step on */
     check("gate length defaults to the whole step",
           strcmp(get(api, inst, "hold"), "1.00") == 0);
