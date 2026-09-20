@@ -167,7 +167,16 @@ typedef struct tg_instance {
      * recomputed in get_param because get_param runs on the audio callback
      * too and must stay trivial. */
     float  ms_per_step;
-    int    running;
+    /* "THE PLAYHEAD IS MOVING", which is NOT "the transport is running".
+     *
+     * Under TG_STOPPED_FREE the pattern advances with the transport stopped --
+     * that is the whole point of the mode -- so a field holding `beats >= 0`
+     * reported 0 while step_pos genuinely moved, and the UI's extrapolator
+     * (the only reader) froze its playhead exactly where it was most wanted.
+     * The name carries the distinction because a field called `running`
+     * holding "running or free-running" is the sort of quiet lie the next
+     * reader acts on. */
+    int    advancing;
 } tg_instance_t;
 
 static const host_api_v1_t *g_host = NULL;
@@ -349,9 +358,12 @@ static void v2_process_block(void *instance, int16_t *audio_inout, int frames) {
     if (g_host && g_host->get_beat_position) beats = g_host->get_beat_position();
     int running = (beats >= 0.0);
 
-    /* What the UI needs to animate between reads -- see the `ui` readout. */
+    /* What the UI needs to animate between reads -- see the `ui` readout.
+     * Free-run counts as advancing: the branch below moves step_pos with no
+     * transport at all. `running` itself is untouched -- the sync logic and
+     * `was_running` still mean the transport and nothing else. */
     in->ms_per_step = (float)(samples_per_step * 1000.0 / SAMPLE_RATE);
-    in->running = running;
+    in->advancing = running || in->stopped_mode == TG_STOPPED_FREE;
 
     if (running) {
         double target = beats / beats_per_step;
@@ -763,7 +775,7 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
      * as often as the rotation comes round, which is the slideshow the user
      * sees.
      *
-     *   steps : ties : length : phase : ms_step : running : cursor : depths
+     *   steps : ties : length : phase : ms_step : advancing : cursor : depths
      */
     if (strcmp(key, "ui") == 0) {
         int length = p->length < 1 ? 1 : p->length;
@@ -771,7 +783,7 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         if (pos < 0) pos += length;
         int n = snprintf(buf, buf_len, "%X:%X:%d:%.3f:%.2f:%d:%d:",
                          p->steps, p->ties, length, pos,
-                         in->ms_per_step, in->running, in->cursor);
+                         in->ms_per_step, in->advancing, in->cursor);
         /* Per-step depths as a run of two hex digits each -- one field rather
          * than 32, because the page already pays for this string once per
          * rotation stop and a second read would halve the anchor rate. */

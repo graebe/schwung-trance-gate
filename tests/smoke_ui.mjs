@@ -28,6 +28,8 @@ writeFileSync(resolve(OUT, 'ui_chain.mjs'), src);
 
 let sent = 0;
 let uiLength = 16;              /* what the DSP would report for `length` */
+let uiPhase = 3.250;            /* where the playhead sits */
+let uiMoving = 1;               /* the `advancing` field, not "transport on" */
 const litPads = Object.create(null);
 const params = Object.create(null);
 
@@ -51,7 +53,7 @@ globalThis.host_module_get_param = (k) => {
     if (k in params) return params[k];
     /* Enough of the real contract to let the controller plan pages. */
     if (k === 'chain_params') return readFileSync(process.env.TG_PARAMS, 'utf8');
-    if (k === 'ui')      return `FFFFFFFF:0:${uiLength}:3.250:125.00:1:2:` + 'FF'.repeat(uiLength);
+    if (k === 'ui')      return `FFFFFFFF:0:${uiLength}:${uiPhase.toFixed(3)}:125.00:${uiMoving}:2:` + 'FF'.repeat(uiLength);
     if (k === 'state')   return '{"sv":3}';
     if (k === 'name')    return 'TRANCE GATE';
     return null;                       /* a read that did not answer */
@@ -325,6 +327,124 @@ step('nothing drawn outside the frame', () => {
         if (r.clipped !== 0) throw new Error(`amount ${a}: ${r.clipped} pixels clipped`);
     }
 });
+
+/*
+ * THE RUNNING PLAYHEAD.
+ *
+ * A white pad sweeps with the gate so the pad grid alone says which step is
+ * sounding. Driven from the SAME local clock as the ring's dot -- one anchor,
+ * one extrapolation -- so the two surfaces cannot disagree about where the
+ * playhead is.
+ *
+ * The clock is driven here rather than waited on: a test that sleeps for a
+ * step is a test that is flaky on a loaded machine.
+ */
+{
+    const WHITE = T.PLAYHEAD_COLOUR;
+    const MS_STEP = 125;
+    /* 8 steps, all ON, cursor on step 3, full depth. moving/phase vary. */
+    const mk = (phase, moving, len = 8) =>
+        `FF:0:${len}:${phase.toFixed(3)}:${MS_STEP.toFixed(2)}:${moving}:3:` + 'FF'.repeat(len);
+    const seed = (phase, moving, atMs, len = 8) => {
+        const raw = mk(phase, moving, len);
+        const u = T.parseUi(raw);
+        T.anchorFrom(u, raw, atMs);
+        return u;
+    };
+    const headAt = (u, nowMs) => {
+        const real = Date.now;
+        Date.now = () => nowMs;
+        try { return T.playheadStep(u); } finally { Date.now = real; }
+    };
+
+    step('the playhead is the step the gate is on', () => {
+        const u = seed(3.25, 1, 1000);
+        if (headAt(u, 1000) !== 3) throw new Error(`head ${headAt(u, 1000)}`);
+    });
+
+    step('one step of elapsed time moves it exactly one pad', () => {
+        const u = seed(3.25, 1, 1000);
+        if (headAt(u, 1000 + MS_STEP) !== 4) throw new Error(`head ${headAt(u, 1000 + MS_STEP)}`);
+        if (headAt(u, 1000 + 2 * MS_STEP) !== 5) throw new Error('second step wrong');
+    });
+
+    step('it wraps at Len rather than running past it', () => {
+        const u = seed(7.5, 1, 1000);
+        const h = headAt(u, 1000 + MS_STEP);      /* 7.5 + 1 = 8.5 -> wraps to 0 */
+        if (h !== 0) throw new Error(`head ${h}, expected the wrap to 0`);
+    });
+
+    step('a pattern that is NOT moving has no playhead at all', () => {
+        const u = seed(3.25, 0, 1000);
+        if (headAt(u, 1000) !== -1) throw new Error('a stopped pattern lit a head');
+        if (headAt(u, 1000 + 10 * MS_STEP) !== -1) throw new Error('it started sweeping while stopped');
+    });
+
+    /*
+     * Stop=Free advances the pattern with the TRANSPORT STOPPED -- that is the
+     * whole mode -- so the DSP reports `advancing`, not `beats >= 0`. A naive
+     * "is the transport running" check kills the sweep in exactly the mode
+     * whose purpose is to run without one.
+     */
+    step('free-run sweeps even though the transport is stopped', () => {
+        const u = seed(0.0, 1, 1000);            /* advancing = 1, no transport */
+        if (headAt(u, 1000 + 3 * MS_STEP) !== 3) throw new Error('free-run did not sweep');
+    });
+
+    step('a head past the pattern is refused (stale anchor length)', () => {
+        const u = seed(3.25, 1, 1000);
+        u.length = 2;                            /* Len knob just shrank it */
+        if (headAt(u, 1000) !== -1) throw new Error('lit a pad past the pattern');
+    });
+
+    step('the playhead pad is White, and only that pad', () => {
+        const u = seed(3.25, 1, 1000);
+        const head = headAt(u, 1000);
+        let whites = 0;
+        for (let i = 0; i < u.length; i++) if (T.ledFor(u, i, head) === WHITE) whites++;
+        if (whites !== 1) throw new Error(`${whites} white pads`);
+        if (T.ledFor(u, head, head) !== WHITE) throw new Error('the head pad is not White');
+    });
+
+    step('White beats the selection rung while the head is over it', () => {
+        const u = seed(3.25, 1, 1000);           /* cursor is 3, head is 3 */
+        if (u.cursor !== 3) throw new Error('fixture: cursor moved');
+        if (T.ledFor(u, 3, 3) !== WHITE) throw new Error('selection hid the head');
+    });
+
+    /*
+     * THE HEAD IS PAINT, NOT AN EDIT. It must leave no trace once it passes --
+     * neither in the pattern bits nor in the pad colour.
+     */
+    step('a pad returns to its own colour when the head moves on', () => {
+        const u = seed(3.25, 1, 1000);
+        const before = T.padColour(u, 3);
+        const steps = u.steps, ties = u.ties;
+        T.ledFor(u, 3, 3);                       /* head over it */
+        if (T.ledFor(u, 3, 4) !== before) throw new Error('pad did not revert');
+        if (u.steps !== steps || u.ties !== ties) throw new Error('the head edited the pattern');
+    });
+
+    /*
+     * THE ANCHOR IS SHARED, and this is the case that forced it. It used to be
+     * seeded inside drawRing, which runs only on the ring page -- so on the
+     * cells pages the clock froze and the sweep with it. anchorFrom is called
+     * from the off-ring read too, so a playhead survives paging away.
+     */
+    step('the clock runs with drawRing never called', () => {
+        const u = seed(0.0, 1, 5000);            /* seeded WITHOUT drawing a ring */
+        if (headAt(u, 5000 + 2 * MS_STEP) !== 2) throw new Error('frozen off the ring page');
+    });
+
+    /* And through the real tick loop, end to end. */
+    step('a white pad appears on the grid while playing', () => {
+        uiMoving = 1; uiPhase = 5.0; uiLength = 16;
+        for (let i = 0; i < 40; i++) ui.tick();
+        const white = Object.keys(litPads).filter((n) => litPads[n] === WHITE);
+        if (white.length !== 1) throw new Error(`${white.length} white pads on the grid`);
+        if (T.noteToStep(+white[0]) !== 5) throw new Error(`white pad is step ${T.noteToStep(+white[0])}`);
+    });
+}
 
 /*
  * THE PAGE LAYOUT, planned by the HOST'S OWN PLANNER against this module's

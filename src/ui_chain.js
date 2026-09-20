@@ -35,7 +35,8 @@ import {
 } from '/data/UserData/schwung/shared/input_filter.mjs';
 import {
     Black, BrightRed, DeepRed, RustRed, PaleSalmon,
-    DullGreen, NeonGreen, TealGreen, PaleGreen
+    DullGreen, NeonGreen, TealGreen, PaleGreen,
+    White
 } from '/data/UserData/schwung/shared/constants.mjs';
 
 /* The prefix WE choose. The controller asks getParam for "<prefix>:<key>";
@@ -259,7 +260,7 @@ function parseUi(raw) {
     const length = parseInt(f[2], 10);
     const phase  = parseFloat(f[3]);
     const msStep = parseFloat(f[4]);
-    const running = f[5] === "1";
+    const moving  = f[5] === "1";
     if (!isFinite(steps) || !isFinite(length) || length < 1) return null;
     const cursor = parseInt(f[6], 10);
     /* Per-step depths, two hex digits each. Absent (an older DSP) means full,
@@ -277,17 +278,45 @@ function parseUi(raw) {
         length,
         phase: isFinite(phase) ? phase : 0,
         msStep: isFinite(msStep) && msStep > 0 ? msStep : 0,
-        running,
+        /* "the playhead is advancing", which under Stop=Free is true with the
+         * transport stopped. See the `advancing` field in trance_gate.c. */
+        moving,
         /* 0-based here; the `cursor` PARAM is 1-based because it is shown as a
          * step number. The two spellings meet only in the DSP. */
         cursor: isFinite(cursor) ? cursor : 0
     };
 }
 
+/*
+ * Seed the local clock from a fresh reading.
+ *
+ * CALLED FROM BOTH READ SITES, and that is the point. It used to live inside
+ * drawRing, which runs only on the ring page -- so the anchor went stale the
+ * moment you paged to the cells, and anything else driven from it froze there.
+ * The pads are lit the whole time the module is up, so a playhead anchored
+ * only by the ring would sweep on one page of three.
+ *
+ * Comparing the RAW STRING rather than storing blindly keeps the local clock
+ * running smoothly when the rotation hands back the same answer twice.
+ */
+function anchorFrom(u, raw, nowMs) {
+    if (!u) return;
+    if (!anchor || anchor.raw !== raw) {
+        anchor = {
+            raw,
+            phase: u.phase, msStep: u.msStep, length: u.length,
+            moving: u.moving, atMs: nowMs
+        };
+    }
+    anchor.length = u.length;
+    anchor.msStep = u.msStep;
+    anchor.moving = u.moving;
+}
+
 /* Where the playhead is NOW, extrapolated from the last anchor. */
 function livePhase(nowMs) {
     if (!anchor) return null;
-    if (!anchor.running || anchor.msStep <= 0) return anchor.phase;
+    if (!anchor.moving || anchor.msStep <= 0) return anchor.phase;
     const steps = (nowMs - anchor.atMs) / anchor.msStep;
     let ph = anchor.phase + steps;
     ph = ph % anchor.length;
@@ -310,21 +339,7 @@ function drawRing(ctx, o) {
     const vals = (o && o.values) || {};
     const u = parseUiCached(vals.ui);
 
-    if (u) {
-        /* Re-anchor whenever a fresh read lands. Comparing the raw string
-         * rather than storing blindly keeps the local clock running smoothly
-         * when the rotation hands back the same answer twice. */
-        if (!anchor || anchor.raw !== vals.ui) {
-            anchor = {
-                raw: vals.ui,
-                phase: u.phase, msStep: u.msStep, length: u.length,
-                running: u.running, atMs: o.nowMs
-            };
-        }
-        anchor.length = u.length;
-        anchor.msStep = u.msStep;
-        anchor.running = u.running;
-    }
+    anchorFrom(u, vals.ui, o.nowMs);
 
     /* A read that has not answered must not become a picture: say so and stop,
      * rather than draw a ring of a guessed length. */
@@ -535,7 +550,13 @@ function refreshUiOffRing() {
     /* null is a read that did not complete and "" is a key that produced
      * nothing -- neither is news about the pattern, so keep the last answer
      * rather than blanking the grid on a timeout. */
-    if (raw !== null && raw !== undefined && raw !== "") parseUiCached(raw);
+    if (raw === null || raw === undefined || raw === "") return;
+    const u = parseUiCached(raw);
+    /* The SAME anchor the ring seeds. Without this the playhead is frozen on
+     * every page but the ring -- this read is the only one that happens there.
+     * Its ~7Hz is well under a fast step rate, which is exactly what livePhase
+     * exists to cover: it extrapolates at frame rate between anchors. */
+    anchorFrom(u, raw, Date.now());
 }
 
 /*
@@ -587,6 +608,47 @@ function padColour(u, i) {
 }
 
 /*
+ * WHICH STEP THE GATE IS ON RIGHT NOW, or -1 when the pattern is not moving.
+ *
+ * Read from the same local clock the ring's dot uses, so the two surfaces
+ * cannot disagree about where the playhead is -- they are one anchor and one
+ * extrapolation, not two that happen to look alike.
+ *
+ * `Date.now()` is the RIGHT clock: the controller's own time is
+ * `io.now || (() => Date.now())` and this module supplies no `io.now`, so the
+ * nowMs drawRing is handed and this call are the same epoch. Two clocks here
+ * would drift by however far apart their zeros sat, and it would look like a
+ * tempo error rather than a bug.
+ *
+ * The clamp to `u.length` matters: `anchor.length` can lag `u` by one read
+ * after the length knob moves, and an unclamped head would light a pad past
+ * the end of the pattern -- a pad that is otherwise always dark.
+ */
+function playheadStep(u) {
+    if (!u || !anchor || !anchor.moving) return -1;
+    const ph = livePhase(Date.now());
+    if (ph === null || !isFinite(ph)) return -1;
+    const i = Math.floor(ph);
+    return (i >= 0 && i < u.length) ? i : -1;
+}
+
+/*
+ * The colour a pad should be, playhead included.
+ *
+ * ONE HELPER FOR ALL THREE WRITE SITES -- the spread first paint, the steady
+ * state and the forced heal. They each write the same pad on different frames,
+ * so a head applied at two of them and not the third is a pad that flickers
+ * once per heal sweep and nowhere else.
+ *
+ * WHITE WINS OVER THE SELECTION RUNG. The head is transient and the selection
+ * is static: you know where you put the cursor, and the lighter rung is back
+ * the instant the head moves on. The reverse would punch a hole in the sweep.
+ */
+function ledFor(u, i, head) {
+    return i === head ? White : padColour(u, i);
+}
+
+/*
  * Paint the pads.
  *
  * Three jobs in one pass, in the order that matters:
@@ -607,19 +669,31 @@ function padColour(u, i) {
 function paintPads(u) {
     if (!u) return;
 
+    /*
+     * Resolved ONCE per frame, not per pad: it reads a clock, and asking it 32
+     * times could straddle a step boundary and light two heads in one pass.
+     *
+     * The playhead costs TWO packets when it moves and none when it does not
+     * -- setLED caches, so the 32-pad loop below sends only what changed. Past
+     * about 44 steps/sec (1/64 at a fast tempo) the head SKIPS steps rather
+     * than lagging, because the tick rate is the ceiling. That is correct and
+     * is not a dropped frame.
+     */
+    const head = playheadStep(u);
+
     if (!padsPainted) {
         const end = Math.min(ledPaintCursor + LED_PER_FRAME, PAD_COUNT);
         for (let i = ledPaintCursor; i < end; i++) {
-            setLED(stepToNote(i), padColour(u, i));
+            setLED(stepToNote(i), ledFor(u, i, head));
         }
         ledPaintCursor = end;
         if (ledPaintCursor >= PAD_COUNT) padsPainted = true;
         return;
     }
 
-    for (let i = 0; i < PAD_COUNT; i++) setLED(stepToNote(i), padColour(u, i));
+    for (let i = 0; i < PAD_COUNT; i++) setLED(stepToNote(i), ledFor(u, i, head));
 
-    setLED(stepToNote(ledHealCursor), padColour(u, ledHealCursor), true);
+    setLED(stepToNote(ledHealCursor), ledFor(u, ledHealCursor, head), true);
     ledHealCursor = (ledHealCursor + 1) % PAD_COUNT;
 }
 
@@ -900,6 +974,14 @@ globalThis.chain_ui_test = {
     /* The page layout is planned from these two together, and the smoke test
      * runs the HOST'S planner over them rather than restating the answer. */
     HIERARCHY,
+    /* The playhead, in the three pieces it is made of: seed the clock, read it,
+     * turn it into a pad colour. Exported so the tests can drive the clock
+     * rather than wait for one. */
+    anchorFrom,
+    livePhase,
+    playheadStep,
+    ledFor,
+    PLAYHEAD_COLOUR: White,
     parseUi,
     drawRing,
     padColour,
