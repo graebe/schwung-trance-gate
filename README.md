@@ -16,22 +16,6 @@ on Ableton Move, modelled on the Kilohearts Trance Gate.
 
 Chain `audio_fx` component.
 
-## Requirements
-
-**It needs a Schwung host that supports `page_knobs`.** That is a small
-addition to the knob-grid planner letting a module-drawn page declare its own
-knobs, and it is **not in any released Schwung** — it currently lives in
-[graebe/schwung](https://github.com/graebe/schwung).
-
-Without it the module still installs and still processes audio, but the ring
-page **degrades silently**: it falls back to the level's first eight knobs, so
-Slot and Step Amount are unreachable and the wrong controls sit under your
-hands, with nothing on screen saying so. A companion host fix is needed for
-`Slot` to display its own number rather than one higher.
-
-There is no version gate on the install route below, so this section is the
-only warning you get.
-
 ## Install
 
 Open the Web Manager on your Move — `http://move.local:7700` — go to
@@ -41,8 +25,24 @@ Open the Web Manager on your Move — `http://move.local:7700` — go to
 graebe/schwung-trance-gate
 ```
 
-It reads `release.json` from `main`, downloads the release asset and installs
-to `modules/audio_fx/trance-gate/`. Then add it to a chain slot as an Audio FX.
+It installs to `modules/audio_fx/trance-gate/`; add it to a chain slot as an
+Audio FX. **Nothing else is required** — the stable build runs on released
+Schwung.
+
+### Two tracks
+
+| Channel | Needs | Difference |
+|---|---|---|
+| **Stable** (default) | released Schwung | Length and Rate sit on a page of their own, and the ring is the last page in the rotation — you still land on it when you open the module |
+| **Beta** | a host carrying `page_knobs` | the ring leads the rotation and the grid behind it carries Length and Rate beside the envelope |
+
+Pick a channel with the Stable / Beta toggle at the top of the Modules page.
+The default is Stable and nobody is opted in automatically.
+
+The beta track needs three host changes that are not in any released Schwung —
+`page_knobs`, a canvas page leading its level, and an enum-resolver fix. They
+are proposed upstream; until they land and ship, beta is for people running a
+host built from those branches.
 
 ## Build from source
 
@@ -54,13 +54,19 @@ to `modules/audio_fx/trance-gate/`. Then add it to a chain slot as an Audio FX.
 
 ## Releasing
 
-Tagging is what publishes. `src/module.json`, `release.json` and the tag must
-all carry the same version — the workflow fails the build if they disagree,
-before it builds anything.
+Tagging is what publishes, and the **tag picks the channel**: a version
+containing `-beta.` updates `channels.beta`, anything else updates
+`channels.stable` and the top-level fields a channels-unaware manager reads.
+
+`src/module.json` and the tag must carry the same version — the workflow fails
+the build if they disagree, before it builds anything.
 
 ```bash
-git tag v0.1.0 && git push origin v0.1.0
+git tag v0.2.0        && git push origin v0.2.0          # stable, from main
+git tag v0.3.0-beta.1 && git push origin v0.3.0-beta.1   # beta, from the beta branch
 ```
+
+A beta is only offered when it is strictly newer than stable.
 
 ## Licence
 
