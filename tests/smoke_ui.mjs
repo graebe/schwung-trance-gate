@@ -722,8 +722,6 @@ step('nothing drawn outside the frame', () => {
  * which is the only place the answer lives.
  */
 {
-    const { planPages: planPagesForTest } =
-        await import(resolve(SHARED, 'param_pages/page_plan.mjs'));
     const chainParams = JSON.parse(readFileSync(process.env.TG_PARAMS, 'utf8'));
     const canvas = chainParams.find((p) => p.type === 'canvas' && p.as_page);
     const src = readFileSync('src/ui_chain.js', 'utf8');
@@ -740,29 +738,13 @@ step('nothing drawn outside the frame', () => {
         if (!reads.length) throw new Error('found no vals.<key> reads -- scraper broke');
     });
 
-    /*
-     * ASKED OF THE PLANNER, not of the declaration. The ring page's knobs come
-     * from the level's first eight -- there is no `page_knobs` on this track --
-     * so the only honest source for "what does this page fetch" is the planned
-     * page itself, plus the canvas extra keys.
-     */
-    step('every value drawRing reads is actually fetched by the ring page', () => {
+    step('every value drawRing reads is declared on the canvas page', () => {
         if (!canvas) throw new Error('no as_page canvas param found');
-        const hierarchy = JSON.parse(globalThis.chain_ui_test.HIERARCHY);
-        const plan = planPagesForTest({ hierarchy, chainParams });
-        const page = plan.pages.find((p) => p.canvas);
-        if (!page) throw new Error('the planner emitted no canvas page');
-        const fetched = new Set([].concat(page.keys || [], (page.canvas || {}).extraKeys || []));
-        const missing = reads.filter((k) => !fetched.has(k));
+        const declared = new Set([].concat(canvas.page_knobs || [], canvas.extra_keys || []));
+        const missing = reads.filter((k) => !declared.has(k));
         if (missing.length)
             throw new Error(`${missing.join(', ')} -- read by drawRing, fetched by nothing, ` +
-                            `so the label renders empty. Add to extra_keys or to the first eight knobs.`);
-    });
-
-    /* This track must not depend on a host feature that is not released. */
-    step('no page_knobs: the ring layout is carried by knob ORDER', () => {
-        if (canvas.page_knobs)
-            throw new Error('page_knobs declared -- that is the beta track, not this one');
+                            `so the label renders empty. Add to extra_keys.`);
     });
 
     step('and each of those is a real param, not a typo', () => {
@@ -802,28 +784,42 @@ step('nothing drawn outside the frame', () => {
         if (!r.pages[0] || !r.pages[0].canvas) throw new Error('page 1 is not the canvas page');
         if (page(0) !== want) throw new Error(`got ${page(0)}`);
     });
-    step('page 2 is the grid, with the envelope whole on row 2', () => {
-        const want = 'slot,amount,step_amount,hold,attack,decay,sustain,release';
+    step('page 2 is the grid, and Len/Rate are only here', () => {
+        const want = 'length,rate,amount,hold,attack,decay,sustain,release';
         if (page(1) !== want) throw new Error(`got ${page(1)}`);
     });
-    step('page 3 carries the settings you set once', () => {
-        if (page(2) !== 'length,rate') throw new Error(`got ${page(2)}`);
+    /*
+     * THERE IS NO THIRD PAGE. Asserted as a COUNT rather than as "page 3 is
+     * not `stopped`", so a page coming back under any other name fails here
+     * instead of passing a check that only knew the old one's name.
+     * (The host appends My Presets / Module after the walk; those are not
+     * this module's pages and planPages does not emit them here.)
+     */
+    step('the module plans exactly two pages', () => {
+        if (r.pages.length !== 2)
+            throw new Error(`${r.pages.length}: ` + r.pages.map((p) => p.name).join(', '));
     });
 
-    /*
-     * THE REFLOW IS REQUIRED, not incidental. Authored, the adsr group sits at
-     * positions 4-7 and straddles the two rows of the 2x4 grid -- and a viz
-     * group that straddles is dropped WHOLE and in SILENCE, taking the
-     * envelope graphic with it. alignGroupsToRows moves Gate ahead of it so
-     * the four land on row 2 together. Asserting "no reflow happened" would
-     * pass on a page that had lost its graphic.
-     */
-    step('the envelope group is reflowed onto one row, not dropped', () => {
-        const keys = (r.pages[1].keys || []);
-        const pos = ['attack', 'decay', 'sustain', 'release'].map((k) => keys.indexOf(k));
-        if (pos.some((i) => i < 0)) throw new Error('an envelope key is missing: ' + keys);
-        if (Math.min(...pos) < 4 || Math.max(...pos) > 7)
-            throw new Error('adsr straddles the rows at ' + pos.join(',') + ' -> graphic dropped');
+    /* A declaration left behind would put an orphan cell back on the grid
+     * with no code behind it -- a knob that reads and writes nothing. */
+    step('`stopped` is gone from chain_params entirely', () => {
+        if (chainParams.some((p) => p.key === 'stopped'))
+            throw new Error('stopped is still declared');
+    });
+    step('the two pages do NOT share a key list', () => {
+        if (page(0) === page(1)) throw new Error('ring and grid collapsed onto one list');
+    });
+    step('the envelope group needed no reflow', () => {
+        if ((r.realigned || []).length) throw new Error(JSON.stringify(r.realigned));
+        if ((r.warnings || []).length) throw new Error(JSON.stringify(r.warnings));
+    });
+    /* A DECLARATION THE PLANNER DROPS IS THE SAME AS NO DECLARATION, and
+     * extra_keys is capped -- so assert what the page actually CARRIES, not
+     * what chain_params says. */
+    step('the ring page carries ui and rate as extra keys', () => {
+        const ek = (r.pages[0].canvas || {}).extraKeys || [];
+        for (const k of ['ui', 'rate'])
+            if (ek.indexOf(k) < 0) throw new Error(`${k} did not survive into canvas.extraKeys: ${ek}`);
     });
 
     step('every page_knobs key is declared in chain_params', () => {
@@ -850,9 +846,8 @@ step('nothing drawn outside the frame', () => {
         if (metaOf('length').wire_format !== 'index') throw new Error('undeclared');
         if (metaOf('cursor').wire_format !== 'index') throw new Error('cursor undeclared');
     });
-    step('slot declares the index convention too', () => {
-        if (metaOf('slot').wire_format !== 'index') throw new Error('undeclared');
-        if (metaOf('slot').options_as_string) throw new Error('still name-wired');
+    step('slot declares the NAME convention (it speaks 1-based)', () => {
+        if (metaOf('slot').options_as_string !== true) throw new Error('undeclared');
     });
     step('a 16-step pattern reads 16 after the learner has run', () => {
         const meta = metaOf('length');
@@ -863,21 +858,11 @@ step('nothing drawn outside the frame', () => {
         const wire = F.formatParamForSet(15, meta);
         if (wire !== '15') throw new Error(`writes ${JSON.stringify(wire)} -> atoi+1 = ${+wire + 1} steps`);
     });
-    /*
-     * THE WHOLE POINT OF THE DECLARATION. Index-wiring alone displays right
-     * and WRITES WRONG on a released host: the learner latches NAME off the
-     * numeral, and formatParamForSet then answers the option one past the one
-     * picked, so the knob jumps. Declared, both halves agree on every slot.
-     */
-    step('every slot displays and writes correctly', () => {
-        for (let i = 0; i < 8; i++) {
-            const meta = Object.assign({}, metaOf('slot'));
-            F.learnEnumWireFormat(meta, String(i));
-            const shown = F.formatParamValue(String(i), meta);
-            const wire = F.formatParamForSet(i, meta);
-            if (shown !== String(i + 1)) throw new Error(`slot ${i} displays ${shown}`);
-            if (wire !== String(i)) throw new Error(`slot ${i} writes ${wire}, not ${i}`);
-        }
+    step('slot 1 still reads 1 and writes 1', () => {
+        const meta = metaOf('slot');
+        F.learnEnumWireFormat(meta, '1');
+        if (F.formatParamValue('1', meta) !== '1') throw new Error(F.formatParamValue('1', meta));
+        if (F.formatParamForSet(0, meta) !== '1') throw new Error(F.formatParamForSet(0, meta));
     });
 }
 

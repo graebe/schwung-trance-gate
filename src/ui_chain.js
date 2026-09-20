@@ -118,37 +118,34 @@ const HIERARCHY = JSON.stringify({
     modes: null,
     levels: {
         /*
-         * ONE LEVEL, and THE ORDER OF THIS LIST IS THE RING PAGE'S LAYOUT.
+         * ONE LEVEL, and this list is the CELLS pages only.
          *
-         * A canvas page takes the level's FIRST EIGHT knobs, so putting the
-         * eight the ring wants at the front is what puts them under the
-         * encoders while you are looking at the pattern -- and it needs
-         * nothing at all of the host, which is why this build runs on released
-         * Schwung. Planned against the released planner:
+         * The ring page names its own knobs now -- `page_knobs` on the `gate`
+         * canvas param in chain_params -- so the two surfaces no longer have
+         * to agree. They never wanted to: the ring is what you hold while the
+         * pattern plays (slot, the two amounts, the envelope) and the grid is
+         * where the settings live (length, rate, gate length). Before that
+         * field existed a canvas page took the level's first eight knobs, so
+         * removing Length from the picture removed it from the settings too.
          *
-         *     canvas   Slot Amnt Step Att Dec Sus Rel Gate
-         *     cells 1  Slot Amnt Step Gate | Att Dec Sus Rel
-         *     cells 2  Len  Rate
+         *     page 1  Gate      Slot  Amnt  Step  Att  Dec  Sus  Rel
+         *     page 2  Main      Len   Rate  Amnt  Gate | Att Dec Sus Rel
+         *     page 3  Main - 2  Stop
          *
-         * The envelope graphic survives: alignGroupsToRows moves Gate ahead of
-         * attack so the adsr group lands whole on row 2. A viz group that
-         * straddles two rows is dropped WHOLE and in silence, so that reflow
-         * is load-bearing rather than cosmetic.
+         * ORDER IS LOAD-BEARING on page 2: attack/decay/sustain/release occupy
+         * positions 5-8, i.e. row 2 of the 2x4 grid, so alignGroupsToRows has
+         * nothing to reflow. A viz group straddling two rows is dropped WHOLE
+         * and in silence, and that group is the envelope graphic.
          *
-         * Length and Rate sit last deliberately -- they are settings you set
-         * once, and the only cost of their being on a page of their own is a
-         * page of their own. The beta track declares `page_knobs` instead and
-         * gets them onto the first cells page; that needs a host feature that
-         * is not released.
-         *
-         * `cursor` and `step` have no knob at all -- a pad is the step.
+         * `slot` and `step_amount` are deliberately absent: they are on the
+         * ring page and nowhere else. `cursor` and `step` have no knob at all
+         * -- a pad is the step.
          */
         root: {
             name: "Gate",
             children: null,
-            knobs: ["slot", "amount", "step_amount",
-                    "attack", "decay", "sustain", "release", "hold",
-                    "length", "rate"],
+            knobs: ["length", "rate", "amount", "hold",
+                    "attack", "decay", "sustain", "release"],
             params: ["gate"]
         }
     }
