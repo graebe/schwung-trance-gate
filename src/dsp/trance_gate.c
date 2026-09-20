@@ -583,7 +583,7 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
     tg_pattern_t *p = &in->pat[in->slot];
 
     if (strcmp(key, "slot") == 0) {
-        int s = atoi(val) - 1;               /* shown 1..8, held 0..7 */
+        int s = atoi(val);                   /* the wire is the OPTION INDEX */
         if (s >= 0 && s < TG_SLOTS) {
             in->slot = s;
             /* The cursor is GLOBAL and the length is PER SLOT, so switching to
@@ -774,7 +774,7 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
     const tg_pattern_t *p = &in->pat[in->slot];
 
     if (strcmp(key, "name") == 0)    return snprintf(buf, buf_len, "TRANCE GATE");
-    if (strcmp(key, "slot") == 0)    return snprintf(buf, buf_len, "%d", in->slot + 1);
+    if (strcmp(key, "slot") == 0)    return snprintf(buf, buf_len, "%d", in->slot);
     if (strcmp(key, "length") == 0)  return snprintf(buf, buf_len, "%d", p->length - 1);
     if (strcmp(key, "rate") == 0)    return snprintf(buf, buf_len, "%s", tg_rates[in->rate_idx].label);
     if (strcmp(key, "attack") == 0)  return snprintf(buf, buf_len, "%.1f", in->attack_ms);
@@ -896,22 +896,25 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         static const char *params =
         "["
         /*
-         * `options_as_string` because this one speaks NAMES -- get answers
-         * `slot + 1`, set does `atoi(val) - 1` -- while `length` and `cursor`
-         * below speak INDICES off an option list that looks identical.
+         * INDEX-WIRED AND SAYING SO, like `length` and `cursor` below.
          *
-         * Two numeral enums, opposite conventions, and NEITHER can be worked
-         * out from a value: every index that is at least 1 is also one of the
-         * option names, so "1" is both slot 0 by name and slot 1 by number.
-         * The host's learner used to guess (name first) and was right here by
+         * Every one of the three is a numeral enum, where a value is
+         * ambiguous by construction: "1" is both option 1 by name and option 0
+         * by number. The host's learner guesses NAME first for such a value,
+         * and a guess is not something to build on -- it is right here only by
          * luck and wrong on `length`, which is how a 16-step pattern came to
-         * read 15 and write 17. It refuses to guess now, so an ambiguous enum
-         * that does not declare is read as an index -- which is correct for
-         * the two below and would silently shift this one by a slot.
+         * read 15 and write 17.
+         *
+         * A declaration is honoured ahead of the learner and never learned
+         * over, on every host version, which is what makes this correct on
+         * released Schwung as well as on a patched one. This param used to be
+         * name-wired: it displayed right and WROTE WRONG on a stock host,
+         * because the learner latched NAME off the numeral and the write came
+         * back as the option one past the one picked.
          */
         "{\"key\":\"slot\",\"name\":\"Slot\",\"type\":\"enum\","
-          "\"options_as_string\":true,"
-          "\"options\":[\"1\",\"2\",\"3\",\"4\",\"5\",\"6\",\"7\",\"8\"],\"default\":\"1\"},"
+          "\"wire_format\":\"index\","
+          "\"options\":[\"1\",\"2\",\"3\",\"4\",\"5\",\"6\",\"7\",\"8\"],\"default\":\"0\"},"
         /* Knob 3: this step's amount -- an accent, scaled by the global
          * Amount on the settings page. Same quantity, two scopes, which is why
          * they share a name, a unit and a range. */
@@ -1011,24 +1014,22 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
          * is what makes it impossible for the picture to collide with the
          * text: the drawer is handed a frame, not the screen. */
         "{\"key\":\"gate\",\"name\":\"Gate\",\"type\":\"canvas\",\"as_page\":true,"
-          /* READ WITHOUT A KNOB. The rotation fetches page_knobs + extra_keys
-           * and nothing else, so a value the drawer reads and the page does
-           * not declare is simply absent and its label renders EMPTY -- no
-           * error. `rate` used to arrive only because the canvas page took
-           * the level's first eight knobs; page_knobs replaced that list and
-           * took the Rate label out with it. */
-          "\"show_value\":false,\"extra_keys\":[\"ui\",\"rate\"],"
-          /* THE RING PAGE'S OWN KNOBS, which are not the grid's.
+          /* READ WITHOUT A KNOB. The rotation fetches the page's keys plus
+           * extra_keys and nothing else, so a value the drawer reads and the
+           * page does not declare is simply absent and its label renders
+           * EMPTY -- no error. `rate` is not one of the ring's eight, so it
+           * has to be here. */
+          "\"show_value\":false,"
+          /* NO `page_knobs` HERE, ON PURPOSE.
            *
-           * Without this a canvas page takes the level's first eight knobs, so
-           * the picture page and the grid behind it are the SAME EIGHT KEYS and
-           * neither can be arranged without deranging the other. They want
-           * different things: while you are looking at the pattern you reach
-           * for the slot, the two amounts and the envelope; Length and Rate are
-           * settings you leave alone. Those two live on the grid only, and
-           * `slot` and `step_amount` live here only. */
-          "\"page_knobs\":[\"slot\",\"amount\",\"step_amount\","
-            "\"attack\",\"decay\",\"sustain\",\"release\",\"hold\"]}"
+           * A canvas page takes the level's FIRST EIGHT knobs, so the ring's
+           * layout is carried by the ORDER of `knobs` in ui_chain.js rather
+           * than by a declaration -- which means this build needs nothing of
+           * the host and runs on released Schwung. `page_knobs` would give a
+           * tidier grid behind the ring (Length and Rate as cells rather than
+           * a page of their own) and exists only on the beta track, which
+           * waits on a host that has it. */
+          "\"extra_keys\":[\"ui\",\"rate\"]}"
         "]";
         int len = (int)strlen(params);
         if (len >= buf_len) return -1;

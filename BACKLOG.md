@@ -88,12 +88,8 @@ Per-step depth needs a ninth. Ways out, cheapest first:
       page 1 rather than merely where the cursor lands) and the `fitDev`
       measurement fix. Deploying means `install.sh local`, which rebuilds and
       restarts the whole host.
-- [ ] **Still not DEPLOYED** (committed, but `install.sh local` restarts the host) — the `fitDev` fix `render_page_movy.mjs`
-      measured cell values in Tamzen while drawing them in font4x5, so anything
-      ≥3 digits lost its last character ("100 ms" → "100 m"). Fixed on the
-      schwung branch, 41 fleet baseline pages updated, all render tests green —
-      but deploying it means `install.sh local`, which rebuilds and restarts the
-      whole host. Until then 3-digit ms values still truncate on device.
+- [x] ~~`fitDev` measured cell values in Tamzen while drawing in font4x5~~ — fixed,
+      deployed, and split out as its own upstream PR branch.
 - [x] ~~Depth, Mix, Slot and Stop have no cells~~ — back on the Settings page. They kept their metadata and
       still travel in presets, but are unreachable from the grid — the cost of
       collapsing to one settings page. Swap any back in on request.
@@ -107,9 +103,9 @@ Per-step depth needs a ninth. Ways out, cheapest first:
       its complexity.
 - [x] ~~Nothing is committed~~ — both repos pushed to graebe. Both worktrees are dirty; `feature/trance-gate`
       in each repo has no commits beyond the empty root in the module repo.
-- [ ] **No release workflow.** `.github/workflows/` is empty; `release.json` and
-      `src/module.json` must agree on the version, and the catalog entry on the
-      schwung branch already points at `graebe/schwung-trance-gate`.
+- [x] ~~No release workflow~~ — `.github/workflows/release.yml` builds on a `v*`
+      tag, checks the artifact is aarch64, publishes, and routes the tag to the
+      stable or beta channel in `release.json`.
 
 ---
 
@@ -159,9 +155,8 @@ Eight bugs found and fixed; see the commit messages for the reasoning.
 
 ### Still open
 
-- [ ] Deploy the host changes (`install.sh local` — rebuilds and restarts the
-      whole host). Until then the ring is page 1 only because the cursor is
-      moved there, and 3-digit ms values still truncate.
+- [x] ~~Deploy the host changes~~ — deployed. The stable track no longer needs
+      them at all; they are proposed upstream for the beta track.
 - [x] ~~Release workflow + first tag~~ — workflow added
       (`.github/workflows/release.yml`, adapted from schwung-ducker's, plus an
       artifact check because softprops *warns* rather than fails on a missing

@@ -63,22 +63,46 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # A tag routes to a CHANNEL. `-beta.` goes to channels.beta and touches
+      # nothing else; anything else is stable and must ALSO update the
+      # top-level version/download_url, because a manager that predates
+      # channels reads only those and would otherwise be pinned forever.
       - name: Commit release.json
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
+          URL="https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/trance-gate-module.tar.gz"
+          case "$VERSION" in
+            *-beta.*) CHANNEL=beta ;;
+            *)        CHANNEL=stable ;;
+          esac
+          echo "routing $VERSION to the $CHANNEL channel"
 
           git fetch origin main
           git checkout -f main
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          cat > release.json << EOF
-          {
-            "version": "${VERSION}",
-            "download_url": "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/trance-gate-module.tar.gz"
-          }
-          EOF
+          python3 - "$VERSION" "$URL" "$CHANNEL" <<'PY'
+          import json, sys
+          version, url, channel = sys.argv[1], sys.argv[2], sys.argv[3]
+          try:
+              rel = json.load(open("release.json"))
+          except Exception:
+              rel = {}
+          ch = rel.setdefault("channels", {})
+          ch[channel] = {"version": version, "download_url": url}
+          if channel == "stable":
+              # what a channels-unaware manager reads
+              rel["version"] = version
+              rel["download_url"] = url
+          rel = {"version": rel.get("version", version),
+                 "download_url": rel.get("download_url", url),
+                 "channels": ch}
+          json.dump(rel, open("release.json", "w"), indent=2)
+          open("release.json", "a").write("\n")
+          print("release.json now:", json.dumps(rel))
+          PY
 
           git add release.json
-          git commit -m "chore: update release.json for ${{ github.ref_name }}" || echo "No changes to commit"
+          git commit -m "chore: ${CHANNEL} channel -> ${{ github.ref_name }}" || echo "No changes to commit"
           git push origin main
