@@ -26,23 +26,8 @@ graebe/schwung-trance-gate
 ```
 
 It installs to `modules/audio_fx/trance-gate/`; add it to a chain slot as an
-Audio FX. **Nothing else is required** — the stable build runs on released
-Schwung.
-
-### Two tracks
-
-| Channel | Needs | Difference |
-|---|---|---|
-| **Stable** (default) | released Schwung | Length and Rate sit on a page of their own, and the ring is the last page in the rotation — you still land on it when you open the module |
-| **Beta** | a host carrying `page_knobs` | the ring leads the rotation and the grid behind it carries Length and Rate beside the envelope |
-
-Pick a channel with the Stable / Beta toggle at the top of the Modules page.
-The default is Stable and nobody is opted in automatically.
-
-The beta track needs three host changes that are not in any released Schwung —
-`page_knobs`, a canvas page leading its level, and an enum-resolver fix. They
-are proposed upstream; until they land and ship, beta is for people running a
-host built from those branches.
+Audio FX. **Nothing else is required** — it runs on released Schwung
+(1.3.0 or newer).
 
 ## Build from source
 
