@@ -612,11 +612,78 @@ step('nothing drawn outside the frame', () => {
             globalThis.chain_ui_test.state().values[page.keys[0]] = "0.4242";
             ticks(6);
             if (clearCount === 0) throw new Error('a late value repainted nothing');
+
+            /* AN EXTRA KEY IS A VALUE THE DRAWER READS WITH NO CELL -- `rate`
+             * on the ring page. It is an input to the picture, so it has to be
+             * a term in the gate; watching only page.keys leaves it able to
+             * change with nothing to repaint it. */
+            ticks(6);
+            clearCount = 0;
+            ticks(4);
+            if (clearCount !== 0) throw new Error('not settled again: ' + clearCount);
+            globalThis.chain_ui_test.state().values.rate = "1/8T";
+            ticks(6);
+            if (clearCount === 0) throw new Error('an extra key changed and nothing repainted');
         } finally {
             Date.now = realNow;
             uiMoving = 1; uiPhase = 3.250; uiLength = 16;
             ticks(4);
         }
+    });
+}
+
+/*
+ * EVERY VALUE THE RING DRAWS MUST BE ONE THE PAGE ACTUALLY FETCHES.
+ *
+ * The controller's read rotation fetches exactly `page.keys` plus the canvas
+ * param's `extra_keys` -- nothing else reaches the payload the drawer is
+ * handed. So a key drawRing reads and the page does not declare is simply
+ * never there, and the label it feeds renders EMPTY. No error, no warning.
+ *
+ * That is not hypothetical: `rate` used to arrive because the canvas page took
+ * the level's first eight knobs and `rate` was one of them. Declaring
+ * `page_knobs` replaced that list and silently dropped it, and the Rate label
+ * on the ring went blank -- a change about knob layout breaking a text label.
+ *
+ * Worse, it looked intermittent. `s.values` is not cleared when you page, so
+ * one visit to page 2 cached `rate` and the ring looked correct from then on.
+ * Cold open, blank; after a detour, fine.
+ *
+ * THE OTHER TESTS CANNOT SEE ANY OF THIS. renderRing() below builds the
+ * payload it passes in, so it proves the drawer works GIVEN data and never
+ * that the data arrives. This asserts the declaration instead of the picture,
+ * which is the only place the answer lives.
+ */
+{
+    const chainParams = JSON.parse(readFileSync(process.env.TG_PARAMS, 'utf8'));
+    const canvas = chainParams.find((p) => p.type === 'canvas' && p.as_page);
+    const src = readFileSync('src/ui_chain.js', 'utf8');
+
+    /* drawRing's body, so a `vals.` in some other function cannot mask a
+     * missing declaration here or invent one. */
+    const from = src.indexOf('function drawRing(');
+    const to = src.indexOf('\nfunction ', from + 1);
+    const body = src.slice(from, to < 0 ? src.length : to);
+    const reads = [...new Set([...body.matchAll(/\bvals\.([A-Za-z_][A-Za-z0-9_]*)/g)]
+                              .map((m) => m[1]))].sort();
+
+    step('drawRing reads at least one value (the scraper still works)', () => {
+        if (!reads.length) throw new Error('found no vals.<key> reads -- scraper broke');
+    });
+
+    step('every value drawRing reads is declared on the canvas page', () => {
+        if (!canvas) throw new Error('no as_page canvas param found');
+        const declared = new Set([].concat(canvas.page_knobs || [], canvas.extra_keys || []));
+        const missing = reads.filter((k) => !declared.has(k));
+        if (missing.length)
+            throw new Error(`${missing.join(', ')} -- read by drawRing, fetched by nothing, ` +
+                            `so the label renders empty. Add to extra_keys.`);
+    });
+
+    step('and each of those is a real param, not a typo', () => {
+        const keys = new Set(chainParams.map((p) => p.key));
+        const bogus = reads.filter((k) => !keys.has(k));
+        if (bogus.length) throw new Error(`${bogus.join(', ')} are not chain_params keys`);
     });
 }
 
@@ -679,6 +746,15 @@ step('nothing drawn outside the frame', () => {
         if ((r.realigned || []).length) throw new Error(JSON.stringify(r.realigned));
         if ((r.warnings || []).length) throw new Error(JSON.stringify(r.warnings));
     });
+    /* A DECLARATION THE PLANNER DROPS IS THE SAME AS NO DECLARATION, and
+     * extra_keys is capped -- so assert what the page actually CARRIES, not
+     * what chain_params says. */
+    step('the ring page carries ui and rate as extra keys', () => {
+        const ek = (r.pages[0].canvas || {}).extraKeys || [];
+        for (const k of ['ui', 'rate'])
+            if (ek.indexOf(k) < 0) throw new Error(`${k} did not survive into canvas.extraKeys: ${ek}`);
+    });
+
     step('every page_knobs key is declared in chain_params', () => {
         const declared = new Set(chainParams.map((p) => p.key));
         for (const k of r.pages[0].keys)

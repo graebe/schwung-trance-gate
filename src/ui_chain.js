@@ -984,13 +984,22 @@ function shouldRedraw(head) {
     return false;
 }
 
-/* The current page's values, cheaply comparable. */
+/*
+ * The current page's values, cheaply comparable.
+ *
+ * KEYS **AND** CANVAS EXTRA KEYS. An extra key is a value with no cell that
+ * the drawer reads anyway -- `rate` on the ring page is one -- so it is an
+ * input to the picture by exactly the definition this gate is built on, and
+ * watching only `keys` leaves it able to change with nothing to repaint it.
+ */
 function valuesStamp() {
     if (!ctl) return "";
     const p = ctl.page, st = ctl.state;
     if (!p || !p.keys || !st || !st.values) return "";
     let out = ctl.pageIndex + "|";
     for (let i = 0; i < p.keys.length; i++) out += st.values[p.keys[i]] + "\u0001";
+    const ek = p.canvas && p.canvas.extraKeys;
+    if (ek) for (let i = 0; i < ek.length; i++) out += st.values[ek[i]] + "\u0001";
     return out;
 }
 

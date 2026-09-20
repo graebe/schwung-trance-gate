@@ -431,10 +431,10 @@ static void v2_process_block(void *instance, int16_t *audio_inout, int frames) {
      *
      * m = 1 - amount*(1 - env*level) collapses to exactly 1.0 when amount is
      * 0, i.e. every sample is multiplied by one and written back unchanged.
-     * The phase and the envelope are still advanced above and below this
-     * point -- only the per-sample gain work is skipped -- so turning Amount
-     * back up lands on the step the pattern would have reached, not on the
-     * one it was left at.
+     * The PHASE is still advanced -- step_pos moves by the whole block below
+     * -- so turning Amount back up lands on the step the pattern would have
+     * reached rather than on the one it was left at, and the ring and the
+     * pads keep sweeping while it is silent.
      *
      * The ENVELOPE is left frozen mid-stage, which is safe only because
      * attack now ramps from wherever env is: under the old zero-restart this
@@ -1011,7 +1011,13 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
          * is what makes it impossible for the picture to collide with the
          * text: the drawer is handed a frame, not the screen. */
         "{\"key\":\"gate\",\"name\":\"Gate\",\"type\":\"canvas\",\"as_page\":true,"
-          "\"show_value\":false,\"extra_keys\":[\"ui\"],"
+          /* READ WITHOUT A KNOB. The rotation fetches page_knobs + extra_keys
+           * and nothing else, so a value the drawer reads and the page does
+           * not declare is simply absent and its label renders EMPTY -- no
+           * error. `rate` used to arrive only because the canvas page took
+           * the level's first eight knobs; page_knobs replaced that list and
+           * took the Rate label out with it. */
+          "\"show_value\":false,\"extra_keys\":[\"ui\",\"rate\"],"
           /* THE RING PAGE'S OWN KNOBS, which are not the grid's.
            *
            * Without this a canvas page takes the level's first eight knobs, so
