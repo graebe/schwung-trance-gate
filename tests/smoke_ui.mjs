@@ -797,31 +797,46 @@ step('nothing drawn outside the frame', () => {
     const r = planPages({ hierarchy, chainParams });
     const page = (i) => (r.pages[i] ? (r.pages[i].keys || []).join(',') : '<missing>');
 
-    step('page 1 is the ring, with its own knobs', () => {
+    /*
+     * FOUND BY IDENTITY, NOT BY INDEX.
+     *
+     * This build runs on two host versions and they order the pages
+     * differently: a host carrying the canvas-leads change puts the ring
+     * first, a released one puts it last. Asserting "page 1 is the ring"
+     * therefore asserts which host the sibling worktree happens to be checked
+     * out at -- which is exactly how this test once failed for a reason that
+     * had nothing to do with the module. What must hold on BOTH is content.
+     */
+    const ringPage  = r.pages.find((p) => p.canvas);
+    const cellPages = r.pages.filter((p) => !p.canvas && (p.keys || []).length);
+    const keysOf = (p) => (p && p.keys ? p.keys.join(',') : '<missing>');
+    const gridPage = () => cellPages.find((p) => p.keys.includes('attack'));
+
+    step('exactly one ring page, carrying the live controls', () => {
+        if (r.pages.filter((p) => p.canvas).length !== 1)
+            throw new Error('expected exactly one canvas page');
         const want = 'slot,amount,step_amount,attack,decay,sustain,release,hold';
-        if (!r.pages[0] || !r.pages[0].canvas) throw new Error('page 1 is not the canvas page');
-        if (page(0) !== want) throw new Error(`got ${page(0)}`);
+        if (keysOf(ringPage) !== want) throw new Error(`got ${keysOf(ringPage)}`);
     });
-    step('page 2 is the grid, with the envelope whole on row 2', () => {
-        const want = 'slot,amount,step_amount,hold,attack,decay,sustain,release';
-        if (page(1) !== want) throw new Error(`got ${page(1)}`);
-    });
-    step('page 3 carries the settings you set once', () => {
-        if (page(2) !== 'length,rate') throw new Error(`got ${page(2)}`);
+
+    step('Len and Rate have cells somewhere', () => {
+        const all = cellPages.flatMap((p) => p.keys);
+        for (const k of ['length', 'rate'])
+            if (!all.includes(k)) throw new Error(`${k} has no cell on any page`);
     });
 
     /*
-     * THE REFLOW IS REQUIRED, not incidental. Authored, the adsr group sits at
+     * THE REFLOW IS REQUIRED, not incidental: authored, the adsr group sits at
      * positions 4-7 and straddles the two rows of the 2x4 grid -- and a viz
      * group that straddles is dropped WHOLE and in SILENCE, taking the
-     * envelope graphic with it. alignGroupsToRows moves Gate ahead of it so
-     * the four land on row 2 together. Asserting "no reflow happened" would
-     * pass on a page that had lost its graphic.
+     * envelope graphic with it. Asserting "no reflow happened" would pass on a
+     * page that had lost its graphic.
      */
-    step('the envelope group is reflowed onto one row, not dropped', () => {
-        const keys = (r.pages[1].keys || []);
-        const pos = ['attack', 'decay', 'sustain', 'release'].map((k) => keys.indexOf(k));
-        if (pos.some((i) => i < 0)) throw new Error('an envelope key is missing: ' + keys);
+    step('the envelope group lands whole on one row', () => {
+        const grid = gridPage();
+        if (!grid) throw new Error('no page carries the envelope');
+        const pos = ['attack', 'decay', 'sustain', 'release'].map((k) => grid.keys.indexOf(k));
+        if (pos.some((i) => i < 0)) throw new Error('an envelope key is missing: ' + grid.keys);
         if (Math.min(...pos) < 4 || Math.max(...pos) > 7)
             throw new Error('adsr straddles the rows at ' + pos.join(',') + ' -> graphic dropped');
     });

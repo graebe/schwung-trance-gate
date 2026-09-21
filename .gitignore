@@ -1,3 +1,6 @@
 .DS_Store
 build/
 dist/
+
+# reference renders (regenerate with tests/render_ref.c)
+build/*.pcm
