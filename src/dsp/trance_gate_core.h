@@ -98,6 +98,21 @@ void tg_core_set_param(tg_core_t *c, const char *key, const char *val);
  * which is how a shell knows to answer its own (chain_params, ui_hierarchy). */
 int  tg_core_get_param(tg_core_t *c, const char *key, char *buf, int buf_len);
 
+/*
+ * SIZE YOUR get_param BUFFER FROM THIS, DO NOT PICK A NUMBER.
+ *
+ * The longest thing the engine emits is the "state" blob, and it grew with
+ * TG_MAX_STEPS: eight slots of fully accented 128-step patterns is ~2.6 KB,
+ * where 32-step ones were a few hundred bytes. A shell that had guessed 2048
+ * would not fail -- get_param snprintfs, so it TRUNCATES, and a truncated
+ * patch is a project that silently reloads with the wrong pattern.
+ *
+ * The private encoding's true worst case is asserted against this number in
+ * trance_gate_core.c, so growing the format past it is a build failure here
+ * rather than a corrupt save downstream.
+ */
+#define TG_STATE_MAX 4096
+
 void tg_core_on_midi(tg_core_t *c, const uint8_t *msg, int len);
 
 #ifdef __cplusplus

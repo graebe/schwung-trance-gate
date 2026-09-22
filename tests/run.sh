@@ -13,6 +13,33 @@ cc -std=c11 -Wall -Wextra -Isrc/dsp \
    tests/test_core.c src/dsp/trance_gate_core.c -o build/test_core -lm
 ./build/test_core || exit 1
 
+# THE GOLDEN RENDER. 20 seconds of audio through the whole engine, compared
+# by hash against a render captured before the engine was ever split out of
+# the Schwung module.
+#
+# This is the one check that the SOUND has not changed, and it is the reason
+# the 32-bit-mask widening to 128 steps could be done at all: a step shifted
+# by one position, an envelope restarted a sample early, a rate table entry
+# INSERTED rather than appended -- none of those fail a unit test, and all of
+# them fail here. It was being run by hand, which is the same as not being
+# run; a check nobody is obliged to remember is not a check.
+#
+# If this fires and the change to the audio was DELIBERATE, re-record the
+# hash with `tests/render_ref > /tmp/ref.raw` and say so in the commit.
+GOLDEN=b208becc62657c9748247b9daa7b0362
+cc -std=c11 -Wall -Wextra -Wno-unused-parameter -Isrc/dsp \
+   tests/render_ref.c src/dsp/trance_gate.c src/dsp/trance_gate_core.c \
+   -o build/render_ref -lm
+GOT=$(./build/render_ref | md5 -q 2>/dev/null || ./build/render_ref | md5sum | cut -d" " -f1)
+echo
+echo "golden render:"
+if [ "$GOT" = "$GOLDEN" ]; then
+  echo "  20s reference render is bit-identical                      ok"
+else
+  echo "  RENDER CHANGED: got $GOT want $GOLDEN"
+  exit 1
+fi
+
 # The UI smoke test needs the host's shared modules. They live in the sibling
 # schwung worktree; skip rather than fail when it is not checked out.
 SHARED="$(cd .. 2>/dev/null && pwd)/schwung/src/shared"

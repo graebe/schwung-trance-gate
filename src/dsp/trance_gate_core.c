@@ -83,6 +83,12 @@
 _Static_assert(TG_STATE_WORST_CASE <= 8192,
                "state blob can exceed an audio FX slot's 8192-byte cap; "
                "shrink the encoding, TG_MAX_STEPS or TG_SLOTS");
+/* The number embedders size their buffers from is the PUBLIC half of the
+ * same fact, so it is checked against the real encoding rather than kept in
+ * step by hand. */
+_Static_assert(TG_STATE_WORST_CASE < TG_STATE_MAX,
+               "TG_STATE_MAX (trance_gate_core.h) is too small for the "
+               "encoding; every embedder's get_param buffer would truncate");
 
 enum { TG_IDLE = 0, TG_ATTACK, TG_DECAY, TG_SUSTAIN, TG_RELEASE };
 
