@@ -13,6 +13,10 @@
     "chainable": true,
     "component_type": "audio_fx",
     "midi_in": true,
-    "requires_continuous_processing": true
+    "requires_continuous_processing": true,
+    "claims_ccs": [
+      62,
+      63
+    ]
   }
 }

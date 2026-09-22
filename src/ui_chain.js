@@ -55,6 +55,24 @@ const CURSOR_GAP = 2;
  */
 const PAD_FIRST = 68;
 const PAD_COUNT = 32;
+const TG_SLOTS = 8;
+
+/*
+ * 32 PADS, UP TO 128 STEPS -- so the pads are a WINDOW, not the pattern.
+ *
+ * The window is the block of 32 containing the cursor, which means it needs
+ * no control of its own: moving the Step knob past the edge pages it, and the
+ * playhead is always visible in the block you are editing. A separate "page"
+ * control would be a second thing to keep in sync with the cursor for no gain.
+ *
+ * At 32 steps or fewer this is always 0 and nothing about the old behaviour
+ * changes.
+ */
+function padWindow(u) {
+    if (!u || u.length <= PAD_COUNT) return 0;
+    const c = (u.cursor >= 0 && u.cursor < u.length) ? u.cursor : 0;
+    return ((c / PAD_COUNT) | 0) * PAD_COUNT;
+}
 const PAD_COLS = 8;
 
 /*
@@ -181,6 +199,7 @@ let drawnUiRaw = null;
 let drawnStamp = null;
 let paintedHead = -2;
 let paintedUiRaw = null;
+let paintedBase = -1;
 
 /* An input happened: redraw now, and keep redrawing while whatever it started
  * animates. The two facts always move together, so they move in one place. */
@@ -278,6 +297,40 @@ function layout() {
  */
 let uiCache = { raw: null, parsed: null };
 
+/*
+ * A STEP MASK IS AN ARRAY OF 32-BIT WORDS, for the same reason it is in C.
+ *
+ * parseInt("FFFFFFFFFFFFFFFF", 16) is 1.8e19 -- past 2^53, so the low bits
+ * are already gone before anything shifts them -- and JS bitwise operators
+ * truncate to 32 bits regardless. Either one silently loses every step above
+ * 31, and the pattern would simply miss beats with nothing on screen to say
+ * why. So: parse the hex right to left into words, exactly as the engine
+ * does, and read a bit through a helper.
+ */
+function maskFromHex(hex) {
+    const w = [0, 0, 0, 0];
+    if (typeof hex !== "string") return w;
+    let bit = 0;
+    for (let i = hex.length - 1; i >= 0 && bit < 128; i--) {
+        const v = parseInt(hex[i], 16);
+        if (!isFinite(v)) continue;
+        for (let k = 0; k < 4 && bit < 128; k++, bit++)
+            if ((v >> k) & 1) w[bit >> 5] |= (1 << (bit & 31));
+    }
+    return w;
+}
+
+function maskGet(w, i) {
+    if (!w || i < 0 || i >= 128) return 0;
+    return (w[i >> 5] >>> (i & 31)) & 1;
+}
+
+function maskSet(w, i, on) {
+    if (!w || i < 0 || i >= 128) return;
+    if (on) w[i >> 5] |= (1 << (i & 31));
+    else    w[i >> 5] &= ~(1 << (i & 31));
+}
+
 function parseUiCached(raw) {
     if (raw === uiCache.raw) return uiCache.parsed;
     const parsed = parseUi(raw);
@@ -289,13 +342,13 @@ function parseUi(raw) {
     if (typeof raw !== "string" || !raw) return null;
     const f = raw.split(":");
     if (f.length < 7) return null;
-    const steps  = parseInt(f[0], 16);
-    const ties   = parseInt(f[1], 16);
+    const steps  = maskFromHex(f[0]);
+    const ties   = maskFromHex(f[1]);
     const length = parseInt(f[2], 10);
     const phase  = parseFloat(f[3]);
     const msStep = parseFloat(f[4]);
     const moving  = f[5] === "1";
-    if (!isFinite(steps) || !isFinite(length) || length < 1) return null;
+    if (!steps || !isFinite(length) || length < 1) return null;
     const cursor = parseInt(f[6], 10);
     /* Per-step depths, two hex digits each. Absent (an older DSP) means full,
      * never zero -- a missing read must not draw a ring of silent steps. */
@@ -308,7 +361,7 @@ function parseUi(raw) {
     return {
         depths,
         steps,
-        ties: isFinite(ties) ? ties : 0,
+        ties,
         length,
         phase: isFinite(phase) ? phase : 0,
         msStep: isFinite(msStep) && msStep > 0 ? msStep : 0,
@@ -460,10 +513,10 @@ function drawRing(ctx, o) {
     const gap = Math.min(sweep * 0.3, 4);
 
     for (let i = 0; i < n; i++) {
-        const on = (u.steps >> i) & 1;
+        const on = maskGet(u.steps, i);
         /* A tie closes the gap INTO the next segment, so a held pair reads as
          * one long arc -- which is what a tie sounds like. */
-        const tiedOut = on && ((u.ties >> i) & 1) && ((u.steps >> ((i + 1) % n)) & 1);
+        const tiedOut = on && maskGet(u.ties, i) && maskGet(u.steps, (i + 1) % n);
         const a0 = i * sweep + gap / 2;
         const sw = sweep - gap + (tiedOut ? gap : 0);
 
@@ -665,7 +718,7 @@ const RED_RAMP   = [DeepRed,   RustRed,   BrightRed, PaleSalmon];
 function padColour(u, i) {
     if (!u || i >= u.length) return Black;          /* past the pattern: dark */
 
-    const on = (u.steps >> i) & 1;
+    const on = maskGet(u.steps, i);
     const selected = (i === u.cursor);
 
     /*
@@ -760,12 +813,14 @@ function paintPads(u, head) {
      * is the entire reason it is forced, and pacing it to the step rate would
      * leave a stuck LED visible for a whole step.
      */
-    const changed = (head !== paintedHead) || (uiCache.raw !== paintedUiRaw);
+    const base = padWindow(u);
+    const changed = (head !== paintedHead) || (uiCache.raw !== paintedUiRaw) ||
+                    (base !== paintedBase);
 
     if (!padsPainted) {
         const end = Math.min(ledPaintCursor + LED_PER_FRAME, PAD_COUNT);
         for (let i = ledPaintCursor; i < end; i++) {
-            setLED(stepToNote(i), ledFor(u, i, head));
+            setLED(stepToNote(i), ledFor(u, base + i, head));
         }
         ledPaintCursor = end;
         if (ledPaintCursor >= PAD_COUNT) padsPainted = true;
@@ -773,12 +828,13 @@ function paintPads(u, head) {
     }
 
     if (changed) {
-        for (let i = 0; i < PAD_COUNT; i++) setLED(stepToNote(i), ledFor(u, i, head));
+        for (let i = 0; i < PAD_COUNT; i++) setLED(stepToNote(i), ledFor(u, base + i, head));
         paintedHead = head;
         paintedUiRaw = uiCache.raw;
+        paintedBase = base;
     }
 
-    setLED(stepToNote(ledHealCursor), ledFor(u, ledHealCursor, head), true);
+    setLED(stepToNote(ledHealCursor), ledFor(u, base + ledHealCursor, head), true);
     ledHealCursor = (ledHealCursor + 1) % PAD_COUNT;
 }
 
@@ -792,8 +848,9 @@ function paintPads(u, head) {
  */
 function onPadPress(note) {
     const u = uiCache.parsed;
-    const i = noteToStep(note);
-    if (i < 0) return false;
+    const win = noteToStep(note);
+    if (win < 0) return false;
+    const i = padWindow(u) + win;
     /* Past the end of the pattern: dark, and does nothing. */
     if (u && i >= u.length) return true;
 
@@ -818,8 +875,8 @@ function onPadPress(note) {
      * the next step and an off step has nothing to hold -- so on an off step
      * it turns it on, which is what you wanted anyway.
      */
-    const wasOn  = u ? ((u.steps >> i) & 1) : 0;
-    const wasTie = u ? ((u.ties  >> i) & 1) : 0;
+    const wasOn  = u ? maskGet(u.steps, i) : 0;
+    const wasTie = u ? maskGet(u.ties,  i) : 0;
 
     let next;
     if (shiftHeld()) next = wasOn ? (wasTie ? "On" : "Tie") : "On";
@@ -829,10 +886,8 @@ function onPadPress(note) {
     /* The next read brings the truth; moving the cache now keeps the ring and
      * the LEDs with the finger rather than with the rotation. */
     if (u) {
-        const bit = 1 << i;
-        if (next === "Off")      { u.steps &= ~bit; u.ties &= ~bit; }
-        else if (next === "On")  { u.steps |=  bit; u.ties &= ~bit; }
-        else                     { u.steps |=  bit; u.ties |=  bit; }
+        maskSet(u.steps, i, next !== "Off");
+        maskSet(u.ties,  i, next === "Tie");
         u.cursor = i;
     }
     markInput();
@@ -1115,6 +1170,42 @@ function onMidiMessageInternal(data) {
      * 0, and neither should toggle anything.
      */
     if (isHardwarePadPress(data)) { onPadPress(data[1]); return; }
+
+    /*
+     * LEFT / RIGHT STEP THROUGH THE PATTERN SLOTS.
+     *
+     * CC 62 and 63, claimed in module.json. A claimed button is delivered here
+     * and withheld from Move firmware while this editor is on screen, and the
+     * claim drops the moment we leave -- which is why claiming is opt-in at
+     * all: #154 withheld Undo/Copy/Delete unconditionally and had to be
+     * reverted for stealing Move's own Undo during ordinary chain use.
+     *
+     * Shift+arrow never arrives (the host keeps Shift combinations), so there
+     * is no modifier case to handle. CLAMPED, not wrapped: reaching for the
+     * next variation and landing back on the first is a surprise, and the
+     * ends are where you notice you have run out.
+     */
+    if (data && data.length >= 3 && (data[0] & 0xF0) === 0xB0 &&
+        (data[1] === 62 || data[1] === 63)) {
+        if (data[2] > 0) {                      /* press; the release is ours
+                                                 * too, and does nothing */
+            /* The `ui` readout does not carry the slot, so it is read here --
+             * once, on a key press, which is not the draw path. */
+            if (typeof host_module_get_param !== "function") return;
+            const raw = host_module_get_param("slot");
+            const cur = (raw === null || raw === undefined || raw === "")
+                      ? -1 : parseInt(raw, 10);
+            if (!isFinite(cur) || cur < 0) return;   /* a failed read is not a 0 */
+            const next = Math.max(0, Math.min(TG_SLOTS - 1,
+                                              cur + (data[1] === 63 ? 1 : -1)));
+            if (next !== cur && typeof host_module_set_param === "function") {
+                host_module_set_param("slot", String(next));
+                announce("Slot " + (next + 1));
+                markInput();
+            }
+        }
+        return;
+    }
 
     const intent = decodeInput(data, { shift: shiftHeld() });
     if (!intent) return;

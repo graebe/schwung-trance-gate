@@ -773,6 +773,49 @@ step('nothing drawn outside the frame', () => {
 }
 
 /*
+ * ARROWS STEP THE SLOT. CC 62/63, claimed in module.json so the shim delivers
+ * them here and withholds them from Move while this editor is up.
+ */
+{
+    const cc = (n, v) => new Uint8Array([0xB0, n, v]);
+    const slotNow = () => params.slot;
+
+    step('right arrow advances the slot', () => {
+        params.slot = "0";
+        ui.onMidiMessageInternal(cc(63, 127));
+        if (slotNow() !== "1") throw new Error(`slot is ${slotNow()}`);
+    });
+    step('left arrow goes back', () => {
+        ui.onMidiMessageInternal(cc(62, 127));
+        if (slotNow() !== "0") throw new Error(`slot is ${slotNow()}`);
+    });
+    step('it CLAMPS rather than wrapping at the bottom', () => {
+        params.slot = "0";
+        ui.onMidiMessageInternal(cc(62, 127));
+        if (slotNow() !== "0") throw new Error(`wrapped to ${slotNow()}`);
+    });
+    step('...and at the top', () => {
+        params.slot = "7";
+        ui.onMidiMessageInternal(cc(63, 127));
+        if (slotNow() !== "7") throw new Error(`wrapped to ${slotNow()}`);
+    });
+    step('the release does nothing (the press already acted)', () => {
+        params.slot = "3";
+        ui.onMidiMessageInternal(cc(63, 0));
+        if (slotNow() !== "3") throw new Error(`release moved it to ${slotNow()}`);
+    });
+    /* A failed read is not a zero -- treating it as one would silently jump
+     * the user to slot 1 whenever the channel hiccuped. */
+    step('a failed slot read moves nothing', () => {
+        const keep = params.slot;
+        delete params.slot;
+        ui.onMidiMessageInternal(cc(63, 127));
+        if (params.slot !== undefined) throw new Error('acted on a failed read');
+        params.slot = keep;
+    });
+}
+
+/*
  * THE PAGE LAYOUT, planned by the HOST'S OWN PLANNER against this module's
  * real chain_params and its real hierarchy.
  *
