@@ -36,8 +36,33 @@
 extern "C" {
 #endif
 
-#define TG_MAX_STEPS  32
+/* 128 steps is eight bars at 1/16. The masks below are the reason this is a
+ * number and not "as many as you like": a pattern is two bitmaps and a depth
+ * per step, and all of it has to fit a state blob. */
+#define TG_MAX_STEPS  128
 #define TG_SLOTS      8
+#define TG_MASK_WORDS ((TG_MAX_STEPS + 31) / 32)
+
+/*
+ * A step bitmap. This was a bare uint32_t while 32 steps was the ceiling, and
+ * widening it is the invasive half of going to 128: the compiler cannot find
+ * `(p->steps >> i) & 1` for you once the type still has a `>>`. Wrapping it
+ * in a struct is deliberate -- it makes every direct shift a compile error,
+ * so the audit is done by the build rather than by grep.
+ */
+typedef struct { uint32_t w[TG_MASK_WORDS]; } tg_mask_t;
+
+static inline int  tg_mask_get(const tg_mask_t *m, int i) {
+    return (i >= 0 && i < TG_MAX_STEPS) ? (int)((m->w[i >> 5] >> (i & 31)) & 1u) : 0;
+}
+static inline void tg_mask_set(tg_mask_t *m, int i, int on) {
+    if (i < 0 || i >= TG_MAX_STEPS) return;
+    if (on) m->w[i >> 5] |=  (1u << (i & 31));
+    else    m->w[i >> 5] &= ~(1u << (i & 31));
+}
+static inline void tg_mask_zero(tg_mask_t *m) {
+    for (int k = 0; k < TG_MASK_WORDS; k++) m->w[k] = 0;
+}
 
 typedef struct tg_instance tg_core_t;
 

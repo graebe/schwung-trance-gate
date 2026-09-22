@@ -55,26 +55,34 @@
 
 /* What one per-slot field EMITS at worst:
  * "<8 hex steps>:<8 hex ties>:<2 digit length>:<2 hex per step>". */
-#define TG_STATE_FIELD_EMIT (8 + 1 + 8 + 1 + 2 + 1 + 2 * TG_MAX_STEPS)
+#define TG_STATE_FIELD_EMIT (32 + 1 + 32 + 1 + 3 + 1 + 2 * TG_MAX_STEPS)
 /* The buffer that READS one back, with room for the terminator and slack. */
 #define TG_STATE_FIELD_MAX  (TG_STATE_FIELD_EMIT + 16)
 
 /*
- * A BUS INSERT'S STATE IS CAPPED AT 1024 BYTES, AND AN OVERSIZED BLOB IS LEFT
- * ABSENT RATHER THAN TRUNCATED (chain_internal.h, MAX_BUS_FX_STATE_LEN) -- the
- * patch would load with default patterns and nothing would say why.
+ * TWO BUDGETS, AND FOR A LONG TIME THIS GUARDED THE WRONG ONE.
  *
- * Worst case here is ~892 of those 1024, so the headroom is about 13%: one
- * more pattern slot, or sixteen more steps, and a Trance Gate in a bus insert
- * silently stops remembering anything. The assert is what makes that a build
- * failure instead of a field report.
+ *   MAX_FX_STATE_LEN      8192   a normal audio FX slot -- where this runs
+ *   MAX_BUS_FX_STATE_LEN  1024   a bus insert
+ *
+ * The assert was pinned to 1024, which made 128 steps look impossible: eight
+ * slots of them is ~2800 bytes. It is not impossible, it simply does not fit
+ * a BUS INSERT, and the slot budget it actually uses has eight times the room.
+ *
+ * The 1024 case still matters because an oversized blob is dropped rather
+ * than truncated (chain_internal.h) -- a patch would load with default
+ * patterns and nothing would say why. What keeps that off the table in
+ * practice is the trailing-default depth omission in the emitter: a pattern
+ * with no per-step accents writes no depths, so eight slots of ordinary
+ * patterns stay far inside 1024 even at full length. tests/test_core.c pins
+ * where the boundary actually falls rather than leaving it to be discovered.
  */
-#define TG_STATE_HEADER_MAX 140
+#define TG_STATE_HEADER_MAX 160
 #define TG_STATE_WORST_CASE \
     (TG_STATE_HEADER_MAX + TG_SLOTS * (sizeof(",\"p0\":\"\"") + TG_STATE_FIELD_EMIT))
-_Static_assert(TG_STATE_WORST_CASE <= 1024,
-               "state blob can exceed a bus insert's 1024-byte cap; "
-               "shrink the encoding or TG_SLOTS");
+_Static_assert(TG_STATE_WORST_CASE <= 8192,
+               "state blob can exceed an audio FX slot's 8192-byte cap; "
+               "shrink the encoding, TG_MAX_STEPS or TG_SLOTS");
 
 enum { TG_IDLE = 0, TG_ATTACK, TG_DECAY, TG_SUSTAIN, TG_RELEASE };
 
@@ -106,13 +114,17 @@ static const tg_rate_t tg_rates[] = {
     { "1/32",  0.125      },
     { "1/32T", 1.0 / 12.0 },
     { "1/64",  0.0625     },
+    /* APPENDED, never inserted: TG_RATE_DEFAULT is an index into this table
+     * and so is the numeric form a state blob may carry, so putting 1/128
+     * anywhere but the end would silently re-point every saved patch. */
+    { "1/128", 0.03125    },
 };
 #define TG_NUM_RATES ((int)(sizeof(tg_rates) / sizeof(tg_rates[0])))
 #define TG_RATE_DEFAULT 7
 
 typedef struct {
-    uint32_t steps;   /* bit i set = step i is ON                      */
-    uint32_t ties;    /* bit i set = step i holds through into step i+1 */
+    tg_mask_t steps;  /* bit i set = step i is ON                      */
+    tg_mask_t ties;   /* bit i set = step i holds through into step i+1 */
     int      length;  /* 1..32                                          */
     /* Per-step level, 0..255. An ACCENT: the global `depth` scales the whole
      * sequence on top of it, so this says "how much of the gate" and depth
@@ -183,6 +195,9 @@ typedef struct tg_instance {
      * wanted. That mode is gone; the distinction is cheap to keep and the
      * lesson is not. */
     int    advancing;
+    /* Adjacent ON steps hold as ONE gate instead of re-articulating -- every
+     * such pair behaves as if it were tied. See on_step_boundary. */
+    int    legato;
     /* The shell's, not a constant. Changing it only rescales derived lengths,
      * so it is safe to set from prepareToPlay. */
     double sample_rate;
@@ -195,11 +210,11 @@ static inline float clampf(float x, float lo, float hi) {
 }
 
 static inline int pat_step_on(const tg_pattern_t *p, int i) {
-    return (p->steps >> i) & 1u;
+    return tg_mask_get(&p->steps, i);
 }
 
 static inline int pat_step_tied(const tg_pattern_t *p, int i) {
-    return (p->ties >> i) & 1u;
+    return tg_mask_get(&p->ties, i);
 }
 
 static int rate_index_from(const char *val) {
@@ -327,7 +342,16 @@ static void on_step_boundary(tg_instance_t *in, const tg_pattern_t *p,
     int tied    = (prev_step >= 0) && pat_step_tied(p, prev_step);
 
     if (on_now) {
-        if (!(on_prev && tied)) env_enter(in, TG_ATTACK);
+        /*
+         * LEGATO IS "TREAT EVERY ADJACENT PAIR AS TIED".
+         *
+         * At Sustain 100% this changes nothing audible, because attack already
+         * ramps from wherever the envelope is and there is nowhere to ramp
+         * from a fully open gate. The difference appears BELOW 100%, which is
+         * where a retrigger actually re-articulates -- worth knowing before
+         * concluding the switch does nothing.
+         */
+        if (!(on_prev && (tied || in->legato))) env_enter(in, TG_ATTACK);
     } else if (on_prev || in->env_stage != TG_IDLE) {
         env_enter(in, TG_RELEASE);
     }
@@ -517,12 +541,17 @@ void tg_core_process_f32_split(tg_core_t *in, float *l, float *rch, int frames,
 
 static void pattern_defaults(tg_pattern_t *p, int slot) {
     p->length = 16;
-    p->ties = 0;
+    tg_mask_zero(&p->ties);
+    tg_mask_zero(&p->steps);
     for (int i = 0; i < TG_MAX_STEPS; i++) p->depth[i] = TG_DEPTH_FULL;
     /* Slot 1 is every other step -- the plainest thing that is audibly a gate
      * the moment the module is loaded. The rest start fully open, which is
      * silence-free rather than "the effect is broken". */
-    p->steps = (slot == 0) ? 0x5555u : 0xFFFFu;
+    /* Slot 1 is every other step; the rest start fully open. Written through
+     * the bit helpers so the initial pattern cannot silently depend on the
+     * mask being exactly one word wide. */
+    for (int i = 0; i < 16; i++)
+        tg_mask_set(&p->steps, i, (slot == 0) ? (i % 2 == 0) : 1);
 }
 
 tg_core_t *tg_core_create(double sample_rate) {     tg_instance_t *in = (tg_instance_t *)calloc(1, sizeof(tg_instance_t));
@@ -546,9 +575,43 @@ tg_core_t *tg_core_create(double sample_rate) {     tg_instance_t *in = (tg_inst
 
 void tg_core_destroy(tg_core_t *c) { free(c); }
 
-static void set_pattern_hex(uint32_t *dst, const char *val) {
+/*
+ * HEX IS LSB-ALIGNED, AND THAT IS WHAT KEEPS OLD PATCHES READABLE.
+ *
+ * The mask used to be one uint32 printed with %X, so "5555" meant steps
+ * 0,2,4,... Reading right-to-left into word 0 first gives a 128-bit mask the
+ * same meaning, so a v3 blob -- which never has more than 8 hex digits --
+ * lands exactly where it did. And emitting the minimal form (below) writes
+ * "5555" again for any pattern inside 32 steps, so a short pattern's state is
+ * byte-identical to what the previous version wrote. No format version bump,
+ * no migration, and a patch moves between the two builds untouched.
+ */
+static void set_pattern_hex(tg_mask_t *dst, const char *val) {
     if (!val) return;
-    *dst = (uint32_t)strtoul(val, NULL, 16);
+    tg_mask_zero(dst);
+    /* Walk from the END of the string: the last character is the low nibble. */
+    int len = (int)strlen(val);
+    int bit = 0;
+    for (int i = len - 1; i >= 0 && bit < TG_MAX_STEPS; i--) {
+        int c = val[i], v;
+        if      (c >= '0' && c <= '9') v = c - '0';
+        else if (c >= 'a' && c <= 'f') v = c - 'a' + 10;
+        else if (c >= 'A' && c <= 'F') v = c - 'A' + 10;
+        else continue;                       /* skip whitespace, 0x, junk */
+        for (int k = 0; k < 4 && bit < TG_MAX_STEPS; k++, bit++)
+            if ((v >> k) & 1) tg_mask_set(dst, bit, 1);
+    }
+}
+
+/* The minimal hex for a mask: no leading zeros, and only as many words as
+ * carry anything. Writes "0" for an empty mask rather than nothing. */
+static int mask_to_hex(const tg_mask_t *m, char *out, int out_len) {
+    int top = TG_MASK_WORDS - 1;
+    while (top > 0 && m->w[top] == 0) top--;
+    int n = snprintf(out, out_len, "%X", m->w[top]);
+    for (int k = top - 1; k >= 0 && n > 0 && n < out_len; k--)
+        n += snprintf(out + n, out_len - n, "%08X", m->w[k]);
+    return n;
 }
 
 void tg_core_set_param(tg_core_t *instance, const char *key, const char *val) {
@@ -620,16 +683,14 @@ void tg_core_set_param(tg_core_t *instance, const char *key, const char *val) {
          */
         int c = in->cursor;
         if (c >= 0 && c < TG_MAX_STEPS) {
-            uint32_t bit = 1u << c;
             int mode;
             if (strcmp(val, "Off") == 0)      mode = 0;
             else if (strcmp(val, "On") == 0)  mode = 1;
             else if (strcmp(val, "Tie") == 0) mode = 2;
             else { mode = atoi(val); if (mode < 0) mode = 0; if (mode > 2) mode = 2; }
 
-            if (mode == 0)      { p->steps &= ~bit; p->ties &= ~bit; }
-            else if (mode == 1) { p->steps |=  bit; p->ties &= ~bit; }
-            else                { p->steps |=  bit; p->ties |=  bit; }
+            tg_mask_set(&p->steps, c, mode != 0);
+            tg_mask_set(&p->ties,  c, mode == 2);
         }
     } else if (strcmp(key, "step_amount") == 0) {
         int c = in->cursor;
@@ -637,6 +698,9 @@ void tg_core_set_param(tg_core_t *instance, const char *key, const char *val) {
             float f = clampf((float)atof(val), 0.0f, 1.0f);
             p->depth[c] = (uint8_t)(f * 255.0f + 0.5f);
         }
+    } else if (strcmp(key, "legato") == 0) {
+        in->legato = (strcmp(val, "On") == 0 || strcmp(val, "on") == 0 ||
+                      atoi(val) != 0) ? 1 : 0;
     } else if (strcmp(key, "pattern") == 0) {
         set_pattern_hex(&p->steps, val);
     } else if (strcmp(key, "ties") == 0) {
@@ -676,6 +740,10 @@ void tg_core_set_param(tg_core_t *instance, const char *key, const char *val) {
         /* Absent in v1 and v2 blobs, where the gate always ran the whole step;
          * 1.0 is that behaviour, so an old patch is unchanged. */
         in->hold = 1.0f;
+        /* Absent in a pre-legato blob, and 0 is the behaviour those patches
+         * had -- so an old patch loads sounding exactly as it did. */
+        in->legato = 0;
+        if (json_get_number(val, "legato", &n) == 0) in->legato = (n >= 0.5) ? 1 : 0;
         if (json_get_number(val, "hold", &n) == 0) in->hold = clampf((float)n, 0.0f, 1.0f);
         /*
          * THREE SPELLINGS OF ONE VALUE, AND THE OLD PAIR MULTIPLIES.
@@ -706,10 +774,16 @@ void tg_core_set_param(tg_core_t *instance, const char *key, const char *val) {
             char pk[8];
             snprintf(pk, sizeof(pk), "p%d", s);
             if (json_get_string(val, pk, sv, sizeof(sv)) == 0) {
-                unsigned st = 0, ti = 0; int len = 16, used = 0;
-                if (sscanf(sv, "%x:%x:%d%n", &st, &ti, &len, &used) == 3) {
-                    in->pat[s].steps  = (uint32_t)st;
-                    in->pat[s].ties   = (uint32_t)ti;
+                /* The two masks are up to 32 hex digits now, so they are read
+                 * as TEXT and handed to the LSB-aligned parser -- %x would cap
+                 * them at whatever an unsigned holds and silently drop steps
+                 * 32 and up. A v3 blob's 8-digit field parses identically. */
+                char stx[40] = {0}, tix[40] = {0};
+                int len = 16, used = 0;
+                if (sscanf(sv, "%39[0-9a-fA-F]:%39[0-9a-fA-F]:%d%n",
+                           stx, tix, &len, &used) == 3) {
+                    set_pattern_hex(&in->pat[s].steps, stx);
+                    set_pattern_hex(&in->pat[s].ties,  tix);
                     in->pat[s].length = len < 1 ? 1 : (len > TG_MAX_STEPS ? TG_MAX_STEPS : len);
 
                     /*
@@ -757,16 +831,17 @@ int tg_core_get_param(tg_core_t *instance, const char *key, char *buf, int buf_l
     if (strcmp(key, "release") == 0) return snprintf(buf, buf_len, "%.1f", in->release_ms);
     if (strcmp(key, "hold") == 0)    return snprintf(buf, buf_len, "%.2f", in->hold);
     if (strcmp(key, "amount") == 0)  return snprintf(buf, buf_len, "%.2f", in->amount);
+    if (strcmp(key, "legato") == 0)  return snprintf(buf, buf_len, "%d", in->legato);
     if (strcmp(key, "cursor") == 0) return snprintf(buf, buf_len, "%d", in->cursor);
     if (strcmp(key, "step") == 0) {
-        uint32_t bit = 1u << in->cursor;
-        const char *w = !(p->steps & bit) ? "Off" : ((p->ties & bit) ? "Tie" : "On");
+        const char *w = !tg_mask_get(&p->steps, in->cursor) ? "Off"
+                      : (tg_mask_get(&p->ties, in->cursor) ? "Tie" : "On");
         return snprintf(buf, buf_len, "%s", w);
     }
     if (strcmp(key, "step_amount") == 0)
         return snprintf(buf, buf_len, "%.2f", p->depth[in->cursor] * (1.0f / 255.0f));
-    if (strcmp(key, "pattern") == 0) return snprintf(buf, buf_len, "%X", p->steps);
-    if (strcmp(key, "ties") == 0)    return snprintf(buf, buf_len, "%X", p->ties);
+    if (strcmp(key, "pattern") == 0) return mask_to_hex(&p->steps, buf, buf_len);
+    if (strcmp(key, "ties") == 0)    return mask_to_hex(&p->ties, buf, buf_len);
 
     /* The live playhead. Declared "live": true, so the host re-reads
      * `phase:effective` every tick instead of once per value rotation -- the
@@ -804,8 +879,14 @@ int tg_core_get_param(tg_core_t *instance, const char *key, char *buf, int buf_l
         int length = p->length < 1 ? 1 : p->length;
         double pos = fmod(in->step_pos, (double)length);
         if (pos < 0) pos += length;
-        int n = snprintf(buf, buf_len, "%X:%X:%d:%.3f:%.2f:%d:%d:",
-                         p->steps, p->ties, length, pos,
+        /* Same minimal hex the state uses, so a UI that already parses one
+         * parses the other -- and a <=32-step pattern still reports the exact
+         * 8-digit string the previous version did. */
+        char stx[40], tix[40];
+        mask_to_hex(&p->steps, stx, sizeof(stx));
+        mask_to_hex(&p->ties,  tix, sizeof(tix));
+        int n = snprintf(buf, buf_len, "%s:%s:%d:%.3f:%.2f:%d:%d:",
+                         stx, tix, length, pos,
                          in->ms_per_step, in->advancing, in->cursor);
         /* Per-step depths as a run of two hex digits each -- one field rather
          * than 32, because the page already pays for this string once per
@@ -823,14 +904,34 @@ int tg_core_get_param(tg_core_t *instance, const char *key, char *buf, int buf_l
         int n = snprintf(buf, buf_len,
             "{\"sv\":%d,\"slot\":%d,\"rate\":\"%s\","
             "\"attack\":%.2f,\"decay\":%.2f,\"sustain\":%.3f,\"release\":%.2f,"
-            "\"hold\":%.3f,\"amount\":%.3f",
+            "\"hold\":%.3f,\"amount\":%.3f,\"legato\":%d",
             TG_STATE_VERSION, in->slot, tg_rates[in->rate_idx].label,
             in->attack_ms, in->decay_ms, in->sustain, in->release_ms,
-            in->hold, in->amount);
+            in->hold, in->amount, in->legato);
         for (int s = 0; s < TG_SLOTS && n > 0 && n < buf_len; s++) {
-            n += snprintf(buf + n, buf_len - n, ",\"p%d\":\"%X:%X:%d:",
-                          s, in->pat[s].steps, in->pat[s].ties, in->pat[s].length);
-            for (int i = 0; i < TG_MAX_STEPS && n > 0 && n + 2 < buf_len; i++) {
+            char stx[40], tix[40];
+            mask_to_hex(&in->pat[s].steps, stx, sizeof(stx));
+            mask_to_hex(&in->pat[s].ties,  tix, sizeof(tix));
+            n += snprintf(buf + n, buf_len - n, ",\"p%d\":\"%s:%s:%d:",
+                          s, stx, tix, in->pat[s].length);
+            /*
+             * TRAILING DEFAULTS ARE NOT WRITTEN.
+             *
+             * This used to emit TG_MAX_STEPS depths unconditionally -- 64
+             * characters per slot at 32 steps, and 256 at 128, whether or not
+             * a single one differed from full. The reader already treats an
+             * absent depth as FULL (that is how v1 blobs load), so the last
+             * non-default entry is the only place worth stopping at: a
+             * pattern with no accents now writes no depths at all.
+             *
+             * It is what keeps a realistic 8-slot patch inside a bus
+             * insert's 1024 bytes at the new length, and it changes nothing
+             * about what a reader gets back.
+             */
+            int last = -1;
+            for (int i = 0; i < TG_MAX_STEPS; i++)
+                if (in->pat[s].depth[i] != TG_DEPTH_FULL) last = i;
+            for (int i = 0; i <= last && n > 0 && n + 2 < buf_len; i++) {
                 n += snprintf(buf + n, buf_len - n, "%02X", in->pat[s].depth[i]);
             }
             if (n > 0 && n < buf_len) n += snprintf(buf + n, buf_len - n, "\"");

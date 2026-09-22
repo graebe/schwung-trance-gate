@@ -143,13 +143,20 @@ int main(void) {
         const char *st = get(api, inst, "state");
         check("serves state (or the slot file is never written)",
               strstr(st, "\"sv\":") != NULL);
-        /* The blob grew when per-step depths landed (8 slots x 32 bytes as
-         * hex). A truncated blob still parses -- the reader just stops early
-         * -- so the failure would be a patch that loads with its last slots
-         * missing and nothing reporting it. Assert it ends the way it should. */
+        /*
+         * A TRUNCATED BLOB STILL PARSES -- the reader just stops early -- so
+         * the failure mode is a patch that loads with its last slots missing
+         * and nothing reporting it. What proves completeness is the LAST slot
+         * and the closing brace, not a length.
+         *
+         * This used to also require `n > 400`, which was the dense format's
+         * size standing in for "complete". Trailing default depths are no
+         * longer written, so a default patch is ~274 bytes and entirely
+         * intact -- the number was measuring the encoding, not the property.
+         */
         size_t n = strlen(st);
         check("state blob is complete, not truncated",
-              n > 400 && st[n - 1] == '}' && strstr(st, "\"p7\":") != NULL);
+              n > 0 && st[n - 1] == '}' && strstr(st, "\"p7\":") != NULL);
     }
     check("serves chain_params", get(api, inst, "chain_params")[0] == '[');
     check("rate reports its LABEL, not an index",

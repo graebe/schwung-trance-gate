@@ -166,6 +166,145 @@ int main(void) {
         tg_core_destroy(c);
     }
 
+    /*
+     * 128 STEPS. The masks were one uint32 and are now four, and the way that
+     * breaks is silently: a step past 31 lands in the wrong word, or the top
+     * word is never read, and the pattern simply misses beats nobody counts.
+     */
+    printf("128 steps:\n");
+    {
+        tg_core_t *c = tg_core_create(44100.0);
+        tg_core_set_param(c, "length", "127");        /* index -> 128 steps */
+        char buf[64];
+        tg_core_get_param(c, "length", buf, sizeof(buf));
+        check("length reaches 128", atoi(buf) == 127);
+
+        /* Set every step individually and read it back -- the only test that
+         * catches a word-index bug at a boundary (31/32, 63/64, 95/96). */
+        int bad = -1;
+        for (int i = 0; i < 128; i++) {
+            snprintf(buf, sizeof(buf), "%d", i);
+            tg_core_set_param(c, "cursor", buf);
+            tg_core_set_param(c, "step", (i % 3 == 0) ? "On" : "Off");
+        }
+        for (int i = 0; i < 128 && bad < 0; i++) {
+            snprintf(buf, sizeof(buf), "%d", i);
+            tg_core_set_param(c, "cursor", buf);
+            tg_core_get_param(c, "step", buf, sizeof(buf));
+            const char *want = (i % 3 == 0) ? "On" : "Off";
+            if (strcmp(buf, want) != 0) bad = i;
+        }
+        check("every one of the 128 steps round-trips", bad < 0);
+        if (bad >= 0) printf("      first wrong step: %d\n", bad);
+
+        /* Step 127 specifically: the highest bit of the highest word. */
+        tg_core_set_param(c, "cursor", "127");
+        tg_core_set_param(c, "step", "Tie");
+        tg_core_get_param(c, "step", buf, sizeof(buf));
+        check("step 127 -- top bit of the top word -- holds a tie", strcmp(buf, "Tie") == 0);
+        tg_core_destroy(c);
+    }
+
+    /* A <=32-step pattern must still emit the hex the previous version did,
+     * or a patch stops moving between builds. */
+    printf("hex compatibility:\n");
+    {
+        tg_core_t *c = tg_core_create(44100.0);
+        char buf[64];
+        tg_core_set_param(c, "pattern", "5555");
+        tg_core_get_param(c, "pattern", buf, sizeof(buf));
+        check("a 16-step mask still reads back as \"5555\"", strcmp(buf, "5555") == 0);
+        tg_core_set_param(c, "pattern", "FFFFFFFFFFFFFFFF");   /* 64 bits */
+        tg_core_get_param(c, "pattern", buf, sizeof(buf));
+        check("a 64-bit mask survives the round trip",
+              strcmp(buf, "FFFFFFFFFFFFFFFF") == 0);
+        tg_core_destroy(c);
+    }
+
+    /*
+     * LEGATO. Below Sustain 100% an untied ON step re-articulates; legato
+     * makes it hold. At 100% there is nothing to hear, which is why this
+     * measures at 40%.
+     */
+    printf("legato:\n");
+    {
+        double lvl[2];
+        for (int leg = 0; leg < 2; leg++) {
+            tg_core_t *c = tg_core_create(44100.0);
+            tg_core_set_param(c, "rate", "1/16");
+            tg_core_set_param(c, "length", "1");       /* 2 steps, both ON */
+            tg_core_set_param(c, "pattern", "3");
+            tg_core_set_param(c, "ties", "0");
+            tg_core_set_param(c, "attack", "30");
+            tg_core_set_param(c, "decay", "1");
+            tg_core_set_param(c, "sustain", "0.4");
+            tg_core_set_param(c, "release", "0");
+            tg_core_set_param(c, "hold", "1");
+            tg_core_set_param(c, "amount", "1");
+            tg_core_set_param(c, "legato", leg ? "1" : "0");
+
+            tg_transport_t t = { 1, 0.0, 120.0f };
+            const int BL = 64; float b[64 * 2];
+            /* settle through step 0, then measure the first ms of step 1 */
+            /* A 1/16 step at 120 BPM is 5512 samples = ~86 blocks of 64, so
+             * step 1 begins at block 86. Measuring earlier than that measures
+             * step 0 and reports no difference whatever legato does. */
+            double acc = 0; int cnt = 0;
+            for (int blk = 0; blk < 170; blk++) {
+                for (int i = 0; i < BL * 2; i++) b[i] = 1.0f;
+                tg_core_process_f32(c, b, BL, &t);
+                if (blk >= 88 && blk < 150) { for (int i = 0; i < BL; i++) { acc += b[i*2]; cnt++; } }
+                t.beats += (BL / 44100.0) * 2.0;
+            }
+            lvl[leg] = acc / cnt;
+            tg_core_destroy(c);
+        }
+        printf("      step 1 level: legato off %.3f, on %.3f\n", lvl[0], lvl[1]);
+        /* OFF retriggers: attack climbs 0.4 -> 1.0 each step, so the mean sits
+         * ABOVE sustain. ON holds flat AT sustain. The sign matters -- getting
+         * it backwards is how a switch that does nothing looks like it works. */
+        check("legato OFF re-articulates (mean above sustain)", lvl[0] > 0.45);
+        check("legato ON holds flat at sustain", lvl[1] < 0.45);
+        check("and the two genuinely differ", lvl[0] - lvl[1] > 0.05);
+    }
+
+    /*
+     * STATE SIZE. The slot budget is 8192 and a bus insert's is 1024, and an
+     * oversized blob is DROPPED rather than truncated -- so the number worth
+     * knowing is where the bus case stops working, not whether it does.
+     */
+    printf("state size:\n");
+    {
+        tg_core_t *c = tg_core_create(44100.0);
+        char buf[8192];
+        int plain = 0, accented = 0;
+        for (int s = 0; s < 8; s++) {
+            char v[16]; snprintf(v, sizeof(v), "%d", s);
+            tg_core_set_param(c, "slot", v);
+            tg_core_set_param(c, "length", "127");
+            tg_core_set_param(c, "pattern", "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF");
+        }
+        plain = tg_core_get_param(c, "state", buf, sizeof(buf));
+        printf("      8 slots x 128 steps, no accents : %5d bytes\n", plain);
+        for (int s = 0; s < 8; s++) {
+            char v[16]; snprintf(v, sizeof(v), "%d", s);
+            tg_core_set_param(c, "slot", v);
+            for (int i = 0; i < 128; i++) {
+                snprintf(v, sizeof(v), "%d", i);
+                tg_core_set_param(c, "cursor", v);
+                tg_core_set_param(c, "step_amount", "0.5");
+            }
+        }
+        accented = tg_core_get_param(c, "state", buf, sizeof(buf));
+        printf("      the same, every step accented   : %5d bytes\n", accented);
+        check("worst case fits an audio FX slot (8192)", accented > 0 && accented <= 8192);
+        check("no-accent case fits a bus insert (1024)", plain > 0 && plain <= 1024);
+        if (accented > 1024)
+            printf("      note: a fully accented 8x128 patch exceeds a BUS INSERT's\n"
+                   "            1024 bytes. Slots are unaffected.\n");
+        tg_core_destroy(c);
+    }
+
     printf(failures ? "\nFAILED (%d)\n" : "\nPASS\n", failures);
     return failures ? 1 : 0;
 }
