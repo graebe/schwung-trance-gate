@@ -193,6 +193,7 @@ typedef struct tg_instance {
      * recomputed in get_param because get_param runs on the audio callback
      * too and must stay trivial. */
     float  ms_per_step;
+    float  last_bpm;      /* the tempo the last block ran at; see set_rate_ms */
     /* "THE PLAYHEAD IS MOVING". Equal to the transport state today, and kept
      * as its own name on purpose: the UI's extrapolator is the only reader
      * and is written against the concept, not against what drives it. It once
@@ -419,6 +420,7 @@ static int tg_block_setup(tg_instance_t *in, int frames,
     double beats = (t && t->running) ? t->beats : -1.0;
     int running = (beats >= 0.0);
 
+    in->last_bpm = bpm;
     in->ms_per_step = (float)(samples_per_step * 1000.0 / in->sample_rate);
     in->advancing = running;
 
@@ -560,6 +562,16 @@ static void pattern_defaults(tg_pattern_t *p, int slot) {
         tg_mask_set(&p->steps, i, (slot == 0) ? (i % 2 == 0) : 1);
 }
 
+/* One step's duration in ms, at the rate and tempo currently known. Called
+ * whenever either changes, so the `ui` readout never reports a stale one. */
+static void recalc_ms_per_step(tg_instance_t *in) {
+    double bpm = (in->last_bpm > 1.0f) ? (double)in->last_bpm : 120.0;
+    double sr  = (in->sample_rate > 0.0) ? in->sample_rate : 44100.0;
+    double samples = (60.0 / bpm) * sr * tg_rates[in->rate_idx].beats;
+    if (samples < 1.0) samples = 1.0;
+    in->ms_per_step = (float)(samples * 1000.0 / sr);
+}
+
 tg_core_t *tg_core_create(double sample_rate) {     tg_instance_t *in = (tg_instance_t *)calloc(1, sizeof(tg_instance_t));
     if (!in) return NULL;
 
@@ -576,6 +588,20 @@ tg_core_t *tg_core_create(double sample_rate) {     tg_instance_t *in = (tg_inst
     in->last_step = -1;
     in->env_stage = TG_IDLE;
     in->sample_rate = (sample_rate > 0.0) ? sample_rate : 44100.0;
+    /*
+     * A STEP HAS A DURATION BEFORE IT HAS EVER BEEN PLAYED.
+     *
+     * ms_per_step is set on every block, so it was zero until the first one
+     * ran -- and the `ui` readout is the only place a UI can learn how long a
+     * step is. A host that opens the editor before processing (or between
+     * projects) therefore got 0, which is indistinguishable from "no rate",
+     * and the plugin's envelope panel drew nothing at all. Seeding it from
+     * the default rate at a nominal 120 BPM removes the zero state: the
+     * number is what the step WOULD last, and the first block replaces it
+     * with the host's real tempo anyway.
+     */
+    in->last_bpm = 120.0f;
+    recalc_ms_per_step(in);
     return in;
 }
 
@@ -646,6 +672,12 @@ void tg_core_set_param(tg_core_t *instance, const char *key, const char *val) {
         if (in->cursor >= p->length) in->cursor = p->length - 1;
     } else if (strcmp(key, "rate") == 0) {
         in->rate_idx = rate_index_from(val);
+        /* The `ui` readout carries the step DURATION, and it used to be
+         * computed only inside a block -- so a rate changed while the host
+         * was idle reported the old subdivision's length until audio ran
+         * again. The plugin draws its envelope against that number, so the
+         * picture simply disagreed with the knob. */
+        recalc_ms_per_step(in);
     } else if (strcmp(key, "attack") == 0) {
         in->attack_ms = clampf((float)atof(val), 0.0f, 500.0f);
     } else if (strcmp(key, "decay") == 0) {
@@ -984,6 +1016,10 @@ void tg_core_on_midi(tg_core_t *in, const uint8_t *msg, int len) {
 void tg_core_set_sample_rate(tg_core_t *c, double sample_rate) {
     if (!c || sample_rate <= 0.0) return;
     c->sample_rate = sample_rate;
+    /* ms_per_step cancels the sample rate out, so this changes nothing today.
+     * It is here so that "ms_per_step is current" holds at every door into
+     * the struct rather than at the two that happen to matter. */
+    recalc_ms_per_step(c);
 }
 
 double tg_core_get_sample_rate(const tg_core_t *c) {

@@ -24,6 +24,20 @@ static void check_near(const char *what, double got, double want, double tol) {
     if (!ok) failures++;
 }
 
+/* One colon-separated field out of the `ui` readout, as a number. The layout
+ * is steps:ties:length:phase:ms_step:advancing:cursor:depths. */
+static double ui_field(tg_core_t *c, int index) {
+    char buf[1024];
+    if (tg_core_get_param(c, "ui", buf, sizeof(buf)) < 0) return -1.0;
+    const char *p = buf;
+    for (int i = 0; i < index; i++) {
+        p = strchr(p, ':');
+        if (!p) return -1.0;
+        p++;
+    }
+    return atof(p);
+}
+
 /* A gate that is fully open on step 0 and fully shut on step 1, with no
  * envelope at all -- so the first sample that drops tells us exactly where the
  * step boundary fell, in samples. */
@@ -302,6 +316,40 @@ int main(void) {
         if (accented > 1024)
             printf("      note: a fully accented 8x128 patch exceeds a BUS INSERT's\n"
                    "            1024 bytes. Slots are unaffected.\n");
+        tg_core_destroy(c);
+    }
+
+    /*
+     * THE STEP DURATION IS KNOWN BEFORE ANY AUDIO RUNS, and follows the rate
+     * immediately. The `ui` readout is where a UI learns it, and the plugin
+     * draws its envelope against it -- so a value that only appeared after
+     * the first block meant a blank panel on open, and one that only updated
+     * on a block meant the picture disagreed with the Rate knob while the
+     * transport sat still.
+     */
+    printf("step duration in the ui readout:\n");
+    {
+        tg_core_t *c = tg_core_create(44100.0);
+
+        check_near("1/16 at 120 BPM reads 125 ms before any block",
+                   ui_field(c, 4), 125.0, 0.5);
+
+        tg_core_set_param(c, "rate", "1/32");
+        check_near("...and follows the rate with no block between",
+                   ui_field(c, 4), 62.5, 0.5);
+
+        tg_core_set_param(c, "rate", "1/4");
+        check_near("...at the slow end too", ui_field(c, 4), 500.0, 0.5);
+
+        /* A block at a real tempo replaces the nominal 120. */
+        float lr[128];
+        for (int i = 0; i < 128; i++) lr[i] = 0.0f;
+        tg_transport_t t;
+        t.running = 1; t.beats = 0.0; t.bpm = 174.0f;
+        tg_core_process_f32(c, lr, 64, &t);
+        check_near("a block hands over the host's real tempo",
+                   ui_field(c, 4), 60000.0 / 174.0, 1.0);
+
         tg_core_destroy(c);
     }
 
