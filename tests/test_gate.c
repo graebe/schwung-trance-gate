@@ -322,7 +322,9 @@ int main(void) {
     api->destroy_instance(inst);
 
     inst = api->create_instance(NULL, NULL);
-    set(api, inst, "attack", "50");   set(api, inst, "decay", "0");
+    /* 40% of a full-width 1/16 step at 120 BPM is 50 ms -- the duration this
+     * test has always used, in the units a stage is written in now. */
+    set(api, inst, "attack", "40");   set(api, inst, "decay", "0");
     set(api, inst, "sustain", "1");   set(api, inst, "release", "0");
     set_length(api, inst, 16);  set(api, inst, "amount", "1");
     set(api, inst, "depth", "1");
@@ -547,7 +549,7 @@ int main(void) {
     set(api, inst, "step_amount", "0.25");
     strncpy(saved, get(api, inst, "state"), sizeof(saved) - 1);
     saved[sizeof(saved) - 1] = '\0';
-    check("state reports v3", strstr(saved, "\"sv\":3") != NULL);
+    check("state reports v4", strstr(saved, "\"sv\":4") != NULL);
     api->destroy_instance(inst);
     inst = api->create_instance(NULL, NULL);
     set(api, inst, "state", saved);

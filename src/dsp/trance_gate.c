@@ -190,17 +190,25 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
           "\"type\":\"enum\","
           "\"options\":[\"Linear\",\"Exponential\",\"S-Curve\"],"
           "\"wire_format\":\"index\",\"default\":\"0\"},"
-        "{\"key\":\"attack\",\"name\":\"Att\",\"type\":\"float\",\"min\":0,\"max\":500,"
-          "\"default\":2,\"step\":1,\"unit\":\"ms\","
+        /*
+         * A STAGE IS A PERCENTAGE OF THE GATE'S WIDTH, 0..200 -- not
+         * milliseconds, though the keys keep their names because they are in
+         * every saved patch. 100% exactly fills the gate. See stage_samples
+         * in the engine, and note that what a percentage is WORTH in ms moves
+         * with the rate and with Width, which is the point of measuring it
+         * this way.
+         */
+        "{\"key\":\"attack\",\"name\":\"Att\",\"type\":\"float\",\"min\":0,\"max\":200,"
+          "\"default\":1.6,\"step\":0.1,\"unit\":\"%\","
           "\"viz\":{\"group\":\"adsr\",\"role\":\"attack\",\"kind\":\"envelope\"}},"
-        "{\"key\":\"decay\",\"name\":\"Dec\",\"type\":\"float\",\"min\":0,\"max\":500,"
-          "\"default\":20,\"step\":1,\"unit\":\"ms\","
+        "{\"key\":\"decay\",\"name\":\"Dec\",\"type\":\"float\",\"min\":0,\"max\":200,"
+          "\"default\":16,\"step\":0.1,\"unit\":\"%\","
           "\"viz\":{\"group\":\"adsr\",\"role\":\"decay\"}},"
         "{\"key\":\"sustain\",\"name\":\"Sus\",\"type\":\"float\",\"min\":0,\"max\":1,"
           "\"default\":1,\"step\":0.01,\"unit\":\"%\","
           "\"viz\":{\"group\":\"adsr\",\"role\":\"sustain\"}},"
-        "{\"key\":\"release\",\"name\":\"Rel\",\"type\":\"float\",\"min\":0,\"max\":500,"
-          "\"default\":20,\"step\":1,\"unit\":\"ms\","
+        "{\"key\":\"release\",\"name\":\"Rel\",\"type\":\"float\",\"min\":0,\"max\":200,"
+          "\"default\":16,\"step\":0.1,\"unit\":\"%\","
           "\"viz\":{\"group\":\"adsr\",\"role\":\"release\"}},"
         /*
          * THE SAME WORD, AND THE SCOPE IN FRONT OF IT.

@@ -31,7 +31,15 @@ cc -std=c11 -Wall -Wextra -Isrc/dsp \
 # patch's ties at 1 and 5, where the level used to jump mid-gate to the new
 # step's amount. That jump was the bug; everything else is byte-identical.
 # Previous: b208becc62657c9748247b9daa7b0362
-GOLDEN=8e4892aa8e3947594e91cf966f7ddc98
+# Re-recorded 2026-09-23 when the envelope's stages became a percentage of the
+# gate's WIDTH rather than milliseconds. The patch is the same patch in the
+# new units (3.5 ms at a 91.46 ms width is 3.8267%), and the render was
+# compared NUMERICALLY before this was accepted: 554 of 176,400 frames differ
+# and never by more than 4 LSB of 32768, which is the rounding in four decimal
+# places of a percentage. A units change cannot keep a hash; it can and must
+# keep the sound.
+# Previous: 8e4892aa8e3947594e91cf966f7ddc98
+GOLDEN=4264807b9e7da87844309fa48d0cc8a3
 cc -std=c11 -Wall -Wextra -Wno-unused-parameter -Isrc/dsp \
    tests/render_ref.c src/dsp/trance_gate.c src/dsp/trance_gate_core.c \
    -o build/render_ref -lm

@@ -667,6 +667,154 @@ int main(void) {
         tg_core_destroy(c);
     }
 
+    /*
+     * A STAGE IS A PERCENTAGE OF THE GATE'S WIDTH.
+     *
+     * 100% exactly fills the gate, 200% is twice it. The measurable form:
+     * how many samples a stage takes, read off the point the envelope
+     * finishes rising.
+     */
+    printf("stages are measured against Width:\n");
+    {
+        /*
+         * MEASURED BY THE RAMP'S SLOPE, NOT BY WHEN IT FINISHES.
+         *
+         * A 200% stage cannot finish -- that is what 200% MEANS, twice the
+         * gate -- so timing its arrival at full open measures the window the
+         * test happened to render and nothing else. A linear attack is at
+         * t/duration, so sampling a quarter of the way in reads 0.25 whether
+         * the stage completes or not.
+         */
+        struct { const char *pct; double hold; double want_ms; } cases[] = {
+            { "100", 1.00, 125.0 },   /* a full-width 1/16 step at 120 BPM */
+            { "50",  1.00,  62.5 },
+            { "100", 0.50,  62.5 },   /* half the Width -> half the stage */
+            { "200", 0.50, 125.0 },
+        };
+        for (int i = 0; i < 4; i++) {
+            tg_core_t *c = tg_core_create(44100.0);
+            tg_core_set_param(c, "rate",    "1/16");
+            tg_core_set_param(c, "length",  "0");
+            tg_core_set_param(c, "pattern", "1");
+            tg_core_set_param(c, "ties",    "0");
+            tg_core_set_param(c, "decay",   "0");
+            tg_core_set_param(c, "sustain", "1");
+            tg_core_set_param(c, "release", "0");
+            tg_core_set_param(c, "amount",  "1");
+            tg_core_set_param(c, "curve",   "0");   /* linear: a straight ramp */
+            { char v[16]; snprintf(v, sizeof(v), "%.3f", cases[i].hold);
+              tg_core_set_param(c, "hold", v); }
+            tg_core_set_param(c, "attack", cases[i].pct);
+
+            const int at = (int)(44100.0 * cases[i].want_ms / 4000.0);  /* a quarter in */
+            float *buf = render_dc(c, at + 64, 120.0f);
+            char what[96];
+            snprintf(what, sizeof(what), "%s%% of a %.0f%% Width ramps over %.0f ms",
+                     cases[i].pct, cases[i].hold * 100.0, cases[i].want_ms);
+            check_near(what, buf[at], 0.25, 0.02);
+            free(buf);
+            tg_core_destroy(c);
+        }
+    }
+
+    /*
+     * CHANGING THE RATE LEAVES THE PERCENTAGE ALONE and moves what it is
+     * worth in samples. This is the whole reason for measuring against Width:
+     * a patch keeps its shape and only its clock changes.
+     */
+    printf("a rate change rescales the stage, not the number:\n");
+    {
+        tg_core_t *c = tg_core_create(44100.0);
+        tg_core_set_param(c, "rate",    "1/16");
+        tg_core_set_param(c, "length",  "0");
+        tg_core_set_param(c, "pattern", "1");
+        tg_core_set_param(c, "ties",    "0");
+        tg_core_set_param(c, "attack",  "100");
+        tg_core_set_param(c, "decay",   "0");
+        tg_core_set_param(c, "sustain", "1");
+        tg_core_set_param(c, "release", "0");
+        tg_core_set_param(c, "hold",    "1");
+        tg_core_set_param(c, "amount",  "1");
+
+        char a[16], w1[16], w2[16];
+        tg_core_get_param(c, "attack", a, sizeof(a));
+        tg_core_get_param(c, "width_ms", w1, sizeof(w1));
+        tg_core_set_param(c, "rate", "1/32");
+        char a2[16];
+        tg_core_get_param(c, "attack", a2, sizeof(a2));
+        tg_core_get_param(c, "width_ms", w2, sizeof(w2));
+
+        printf("      attack %s%% -> %s%%,  width %s ms -> %s ms\n", a, a2, w1, w2);
+        check("the percentage is untouched", atof(a2) == atof(a));
+        check_near("...and the width halves with the rate",
+                   atof(w1) / atof(w2), 2.0, 0.05);
+        tg_core_destroy(c);
+    }
+
+    /*
+     * A LEGACY PATCH HELD MILLISECONDS. Reinterpreting 2 ms as 2% would be a
+     * patch that loads and sounds like a different patch, so a pre-v4 blob is
+     * CONVERTED using its own rate and Width.
+     */
+    printf("a v3 patch's milliseconds convert:\n");
+    {
+        tg_core_t *c = tg_core_create(44100.0);
+        /* 1/16 at the nominal 120 BPM is 125 ms; hold 0.5 -> a 62.5 ms width.
+         * A 25 ms attack is 40% of that. */
+        tg_core_set_param(c, "state",
+            "{\"sv\":3,\"slot\":0,\"rate\":\"1/16\",\"attack\":25.00,"
+            "\"decay\":12.50,\"sustain\":1.000,\"release\":6.25,"
+            "\"hold\":0.500,\"amount\":1.000,\"legato\":0}");
+        char a[16], d[16], r[16];
+        tg_core_get_param(c, "attack",  a, sizeof(a));
+        tg_core_get_param(c, "decay",   d, sizeof(d));
+        tg_core_get_param(c, "release", r, sizeof(r));
+        printf("      25/12.5/6.25 ms at a 62.5 ms width -> %s / %s / %s %%\n", a, d, r);
+        check_near("a 25 ms attack becomes 40%",   atof(a), 40.0, 0.5);
+        check_near("a 12.5 ms decay becomes 20%",  atof(d), 20.0, 0.5);
+        check_near("a 6.25 ms release becomes 10%", atof(r), 10.0, 0.5);
+        tg_core_destroy(c);
+    }
+
+    /* The scope's clock: a cheap phase with no formatting in it. */
+    printf("the pattern phase runs 0 to 1:\n");
+    {
+        for (int len = 1; len <= 128; len *= 128) {
+            tg_core_t *c = tg_core_create(44100.0);
+            char v[8]; snprintf(v, sizeof(v), "%d", len - 1);
+            tg_core_set_param(c, "rate", "1/16");
+            tg_core_set_param(c, "length", v);
+            tg_core_set_param(c, "hold", "1");
+
+            double lo = 2.0, hi = -1.0, prev = -1.0;
+            int wrapped = 0;
+            /* ENOUGH BLOCKS FOR A PATTERN AND A HALF. A fixed count ran 0.03s
+             * of a 16-second pattern and concluded the phase never wraps,
+             * which is true of any clock you do not wait for. */
+            const double patternBeats = (double)len * 0.25;      /* 1/16 steps */
+            const int blocks = (int)(patternBeats / 2.0 * 44100.0 * 1.5 / 32.0) + 4;
+            for (int b = 0; b < blocks; b++) {
+                float l[32], r[32];
+                for (int i = 0; i < 32; i++) { l[i] = 0.0f; r[i] = 0.0f; }
+                tg_transport_t t;
+                t.running = 1; t.bpm = 120.0f;
+                t.beats = (double)(b * 32) / 44100.0 * 2.0;
+                tg_core_process_f32_split(c, l, r, 32, &t);
+                const double ph = tg_core_phase01(c);
+                if (ph < lo) lo = ph;
+                if (ph > hi) hi = ph;
+                if (prev >= 0.0 && ph < prev - 0.5) wrapped = 1;
+                prev = ph;
+            }
+            char what[64];
+            snprintf(what, sizeof(what), "length %d: stays inside 0..1", len);
+            check(what, lo >= 0.0 && hi <= 1.0);
+            snprintf(what, sizeof(what), "length %d: wraps", len);
+            check(what, wrapped);
+            tg_core_destroy(c);
+        }
+    }
+
     printf(failures ? "\nFAILED (%d)\n" : "\nPASS\n", failures);
     return failures ? 1 : 0;
 }

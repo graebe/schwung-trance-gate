@@ -50,7 +50,13 @@
  *
  * A v2 blob carries both, and the migration MULTIPLIES them, so a saved patch
  * sounds identical after the collapse rather than jumping to full wet. */
-#define TG_STATE_VERSION 3
+/*
+ * 4: attack/decay/release are PERCENTAGES OF WIDTH, not milliseconds. The
+ *    version is what tells the reader which, since the keys did not change --
+ *    a v3 blob's "attack": 2.0 means 2 ms and a v4 blob's means 2% of the
+ *    gate. See the conversion in the state parser.
+ */
+#define TG_STATE_VERSION 4
 #define TG_DEPTH_FULL    255
 
 /* What one per-slot field EMITS at worst:
@@ -119,6 +125,11 @@ enum { TG_IDLE = 0, TG_ATTACK, TG_DECAY, TG_SUSTAIN, TG_RELEASE };
  *
  * The three names live in the header, where the tests can reach them.
  */
+
+/* A stage runs to twice the gate's width and no further -- past that it
+ * cannot finish under any Width, so the extra range would be knob travel with
+ * nothing on the end of it. */
+#define TG_STAGE_MAX_PCT 200.0f
 
 /* The bend. Chosen so the curve is clearly audible without being a step:
  * halfway through an exponential stage the envelope is ~82% of the way. */
@@ -235,6 +246,20 @@ typedef struct tg_instance {
     tg_pattern_t pat[TG_SLOTS];
     int   slot;           /* 0..7, Kilohearts "Pattern Select" */
     int   rate_idx;
+    /*
+     * ATTACK, DECAY AND RELEASE ARE PERCENTAGES OF THE GATE'S WIDTH, 0..200.
+     *
+     * Not milliseconds, despite the names, which are kept because they are
+     * the wire keys and appear in every saved patch. 100% is "exactly fills
+     * the gate"; 200% is "twice the gate", which is a stage that never
+     * finishes before the gate shuts.
+     *
+     * Measured against WIDTH and not against the step because the step is not
+     * the musical unit here -- the gate's open time is. It also makes ms and
+     * % two readings of ONE number rather than two modes: ms is simply
+     * `value/100 * width_ms`, so its maximum moves with the rate and with
+     * Width while the percentage stays put. See stage_samples.
+     */
     float attack_ms;
     float decay_ms;
     float sustain;        /* 0..1 -- a LEVEL, not a duration */
@@ -402,10 +427,26 @@ static inline double ms_to_samples(const tg_instance_t *in, float ms) {
  * ms_per_step is maintained by tg_block_setup and seeded at construction, so
  * it is correct here before any audio has run.
  */
+/* How long the gate is open for, in ms: Width of a step. The unit every
+ * envelope stage is measured in. */
+static inline double width_ms(const tg_instance_t *in) {
+    return (double)in->hold * (double)in->ms_per_step;
+}
+
+/*
+ * HOW LONG A STAGE LASTS.
+ *
+ * `value` is a percentage of the gate's WIDTH, 0..200 -- so 100 is a stage
+ * that exactly fills the gate and 200 one that cannot finish inside it.
+ *
+ * There is no second mode. ms and % are two READINGS of this one number
+ * (`ms = value/100 * width_ms`), which is what makes them agree: changing the
+ * rate or Width moves what a percentage is worth in milliseconds and leaves
+ * the percentage alone. `time_mode` survives only as a display preference the
+ * shells read; the engine does not consult it.
+ */
 static inline double stage_samples(const tg_instance_t *in, float value) {
-    if (in->time_mode != TG_TIME_PCT) return ms_to_samples(in, value);
-    return (double)value * (1.0f / 500.0f)
-         * (double)in->ms_per_step * (in->sample_rate / 1000.0);
+    return (double)value * 0.01 * width_ms(in) * (in->sample_rate / 1000.0);
 }
 
 /*
@@ -755,10 +796,13 @@ tg_core_t *tg_core_create(double sample_rate) {     tg_instance_t *in = (tg_inst
     for (int s = 0; s < TG_SLOTS; s++) pattern_defaults(&in->pat[s], s);
     in->slot = 0;
     in->rate_idx = TG_RATE_DEFAULT;
-    in->attack_ms = 2.0f;
-    in->decay_ms = 20.0f;
+    /* The percentages that reproduce the old 2 / 20 / 20 ms defaults against
+     * a full-width 1/16 step at 120 BPM, so a fresh instance sounds as it
+     * always did. */
+    in->attack_ms = 1.6f;
+    in->decay_ms = 16.0f;
     in->sustain = 1.0f;
-    in->release_ms = 20.0f;
+    in->release_ms = 16.0f;
     in->hold = 1.0f;
     in->amount = 1.0f;
 
@@ -856,15 +900,15 @@ void tg_core_set_param(tg_core_t *instance, const char *key, const char *val) {
          * picture simply disagreed with the knob. */
         recalc_ms_per_step(in);
     } else if (strcmp(key, "attack") == 0) {
-        in->attack_ms = clampf((float)atof(val), 0.0f, 500.0f);
+        in->attack_ms = clampf((float)atof(val), 0.0f, TG_STAGE_MAX_PCT);
     } else if (strcmp(key, "decay") == 0) {
-        in->decay_ms = clampf((float)atof(val), 0.0f, 500.0f);
+        in->decay_ms = clampf((float)atof(val), 0.0f, TG_STAGE_MAX_PCT);
     } else if (strcmp(key, "sustain") == 0) {
         in->sustain = clampf((float)atof(val), 0.0f, 1.0f);
     } else if (strcmp(key, "hold") == 0) {
         in->hold = clampf((float)atof(val), 0.0f, 1.0f);
     } else if (strcmp(key, "release") == 0) {
-        in->release_ms = clampf((float)atof(val), 0.0f, 500.0f);
+        in->release_ms = clampf((float)atof(val), 0.0f, TG_STAGE_MAX_PCT);
     } else if (strcmp(key, "amount") == 0) {
         in->amount = clampf((float)atof(val), 0.0f, 1.0f);
     } else if (strcmp(key, "cursor") == 0) {
@@ -969,6 +1013,11 @@ void tg_core_set_param(tg_core_t *instance, const char *key, const char *val) {
          * quietly reintroduce it.
          */
         char sv[TG_STATE_FIELD_MAX];
+        /* Which format this blob is in; 0 when absent, which the oldest
+         * pre-version blobs are. */
+        double sv_n = 0.0;
+        json_get_number(val, "sv", &sv_n);
+        const int sv_num = (int)sv_n;
         if (json_get_number(val, "slot", &n) == 0 && n >= 0 && n < TG_SLOTS) in->slot = (int)n;
         if (json_get_string(val, "rate", sv, sizeof(sv)) == 0) {
             in->rate_idx = rate_index_from(sv);
@@ -980,10 +1029,15 @@ void tg_core_set_param(tg_core_t *instance, const char *key, const char *val) {
             snprintf(idx, sizeof(idx), "%d", (int)n);
             in->rate_idx = rate_index_from(idx);
         }
-        if (json_get_number(val, "attack",  &n) == 0) in->attack_ms  = clampf((float)n, 0.0f, 500.0f);
-        if (json_get_number(val, "decay",   &n) == 0) in->decay_ms   = clampf((float)n, 0.0f, 500.0f);
+        /* Read raw and clamp LATER: a v3 blob's numbers are milliseconds and
+         * do not fit the 0..200 a percentage does, so clamping here would
+         * flatten every legacy attack above 200 ms before it could be
+         * converted. */
+        double rawAtt = -1.0, rawDec = -1.0, rawRel = -1.0;
+        json_get_number(val, "attack",  &rawAtt);
+        json_get_number(val, "decay",   &rawDec);
+        json_get_number(val, "release", &rawRel);
         if (json_get_number(val, "sustain", &n) == 0) in->sustain    = clampf((float)n, 0.0f, 1.0f);
-        if (json_get_number(val, "release", &n) == 0) in->release_ms = clampf((float)n, 0.0f, 500.0f);
         /* Absent in v1 and v2 blobs, where the gate always ran the whole step;
          * 1.0 is that behaviour, so an old patch is unchanged. */
         in->hold = 1.0f;
@@ -1005,6 +1059,34 @@ void tg_core_set_param(tg_core_t *instance, const char *key, const char *val) {
             in->curve = (c >= TG_CURVE_LINEAR && c <= TG_CURVE_SCURVE) ? c : TG_CURVE_LINEAR;
         }
         if (json_get_number(val, "hold", &n) == 0) in->hold = clampf((float)n, 0.0f, 1.0f);
+        /*
+         * THE STAGES, ONCE RATE AND WIDTH ARE BOTH KNOWN.
+         *
+         * A v3 blob holds absolute milliseconds and a v4 one percentages of
+         * the gate's width, so a legacy patch is converted rather than
+         * reinterpreted -- 2 ms read as 2% would be a patch that loads and
+         * sounds like a different patch.
+         *
+         * The conversion needs the width, which needs the rate AND hold, and
+         * hold is parsed a few lines above this. Hence the raw reads earlier
+         * and the arithmetic here rather than in place.
+         *
+         * IT ASSUMES 120 BPM, because a patch does not carry the tempo it was
+         * written at. ms_per_step is seeded at that tempo and only a running
+         * transport replaces it, so a patch written at 120 converts exactly
+         * and one written elsewhere converts proportionally -- which is the
+         * best available without a tempo to read, and is why the version
+         * exists rather than a silent reinterpretation.
+         */
+        {
+            int legacy_ms = (sv_num > 0 && sv_num < 4);
+            double w = width_ms(in);
+            double to_pct = (legacy_ms && w > 1.0e-6) ? (100.0 / w) : 1.0;
+            if (rawAtt >= 0.0) in->attack_ms  = clampf((float)(rawAtt * to_pct), 0.0f, TG_STAGE_MAX_PCT);
+            if (rawDec >= 0.0) in->decay_ms   = clampf((float)(rawDec * to_pct), 0.0f, TG_STAGE_MAX_PCT);
+            if (rawRel >= 0.0) in->release_ms = clampf((float)(rawRel * to_pct), 0.0f, TG_STAGE_MAX_PCT);
+        }
+
         /*
          * THREE SPELLINGS OF ONE VALUE, AND THE OLD PAIR MULTIPLIES.
          *
@@ -1098,6 +1180,12 @@ int tg_core_get_param(tg_core_t *instance, const char *key, char *buf, int buf_l
      * without duplicating the rate table. */
     if (strcmp(key, "ms_per_step") == 0)
         return snprintf(buf, buf_len, "%.2f", in->ms_per_step);
+    /* How long the gate is open for. A shell showing a stage in MILLISECONDS
+     * needs this and the percentage: ms = value/100 * width_ms. Served rather
+     * than left to the shell to recompute, so the rate table and the hold
+     * clamp stay in one place. */
+    if (strcmp(key, "width_ms") == 0)
+        return snprintf(buf, buf_len, "%.2f", (float)width_ms(in));
     if (strcmp(key, "cursor") == 0) return snprintf(buf, buf_len, "%d", in->cursor);
     if (strcmp(key, "step") == 0) {
         const char *w = !tg_mask_get(&p->steps, in->cursor) ? "Off"
@@ -1249,6 +1337,24 @@ void tg_core_set_sample_rate(tg_core_t *c, double sample_rate) {
      * It is here so that "ms_per_step is current" holds at every door into
      * the struct rather than at the two that happen to matter. */
     recalc_ms_per_step(c);
+}
+
+/*
+ * WHERE THE PLAYHEAD IS IN THE PATTERN, 0..1.
+ *
+ * The "phase" get_param key computes this already -- and formats it with
+ * snprintf, which is why a caller on the audio thread needs its own door. A
+ * scope indexing a column per block would otherwise pay a string conversion
+ * for a number it immediately parses back.
+ */
+double tg_core_phase01(const tg_core_t *c) {
+    const tg_instance_t *in = (const tg_instance_t *)c;
+    if (!in) return 0.0;
+    int length = in->pat[in->slot].length;
+    if (length < 1) length = 1;
+    double pos = fmod(in->step_pos, (double)length);
+    if (pos < 0.0) pos += length;
+    return pos / (double)length;
 }
 
 double tg_core_get_sample_rate(const tg_core_t *c) {

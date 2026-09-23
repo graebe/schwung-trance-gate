@@ -45,10 +45,15 @@ int main(int argc, char **argv) {
     api->set_param(inst, "length",      "15");     /* index -> 16 steps */
     api->set_param(inst, "pattern",     "BEEF");
     api->set_param(inst, "ties",        "0022");
-    api->set_param(inst, "attack",      "3.5");
-    api->set_param(inst, "decay",       "40");
+    /* THE SAME PATCH IN THE NEW UNITS. A stage is a percentage of the gate's
+     * WIDTH now, and this patch's width is 0.75 of a 1/16 step at 123 BPM --
+     * 91.4634 ms. So 3.5 ms is 3.8267%, and the render should come out the
+     * same audio to within conversion rounding. That equivalence is the point
+     * of re-recording rather than simply accepting a new hash. */
+    api->set_param(inst, "attack",      "3.8267");
+    api->set_param(inst, "decay",       "43.7333");
     api->set_param(inst, "sustain",     "0.6");
-    api->set_param(inst, "release",     "25");
+    api->set_param(inst, "release",     "27.3333");
     api->set_param(inst, "hold",        "0.75");
     api->set_param(inst, "amount",      "0.9");
     for (int s = 0; s < 16; s++) {                 /* per-step amounts vary */

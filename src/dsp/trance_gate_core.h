@@ -117,6 +117,13 @@ int  tg_core_get_param(tg_core_t *c, const char *key, char *buf, int buf_len);
  * 0..1 progress. Exposed for the tests: the properties every stage depends on
  * are cheaper to assert here than to infer from rendered audio. */
 enum { TG_CURVE_LINEAR = 0, TG_CURVE_EXP = 1, TG_CURVE_SCURVE = 2 };
+/*
+ * The playhead's position in the pattern, 0..1. Cheap and allocation-free --
+ * for a caller on the audio thread, where the equivalent get_param key's
+ * snprintf does not belong.
+ */
+double tg_core_phase01(const tg_core_t *c);
+
 double tg_test_shape(int curve, double t);
 double tg_test_shape_inv(int curve, double w);
 
