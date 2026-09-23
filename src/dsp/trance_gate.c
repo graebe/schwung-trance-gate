@@ -216,9 +216,15 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
          * scale it. Zero here is a true bypass -- see the gain in
          * process_block.
          */
-        /* Gate length. Sustain is a LEVEL and has none; this is the duration
-         * control, expressed as a share of the step so it follows the Rate. */
-        "{\"key\":\"hold\",\"name\":\"Gate\",\"short_name\":\"Gate\",\"type\":\"float\","
+        /* THE GATE'S WIDTH -- how much of the step it stays open for, as a
+         * share of the step so it follows the Rate. Sustain is a LEVEL and
+         * has no duration; this is the duration.
+         *
+         * It was called "Gate", which collided with two other things wearing
+         * that name here: the per-step on/off/tie control above, and the ring
+         * page below. The KEY stays `hold` -- it is in every saved patch and
+         * is the plugin's automation parameter id. */
+        "{\"key\":\"hold\",\"name\":\"Width\",\"short_name\":\"Width\",\"type\":\"float\","
           "\"min\":0.05,\"max\":1,\"default\":1,\"step\":0.01,\"unit\":\"%\"},"
         "{\"key\":\"amount\",\"name\":\"All Amount\",\"short_name\":\"All\",\"type\":\"float\",\"min\":0,\"max\":1,"
           "\"default\":1,\"step\":0.01,\"unit\":\"%\"},"
