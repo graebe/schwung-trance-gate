@@ -618,6 +618,55 @@ int main(void) {
         tg_core_destroy(c);
     }
 
+    /*
+     * A NEW GATE STARTS WHERE THE GAIN IS, NOT WHERE `env` IS.
+     *
+     * What you hear is env * level, and the level changes at the very
+     * boundary a new gate opens on. att_from carried `env` across, so after a
+     * half-filled pad the envelope resumed at the right ENV and instantly the
+     * wrong GAIN.
+     *
+     * Two steps both fully open (Width 100%, so the gate never closes inside
+     * a step) at different amounts is the smallest case: the gain at the
+     * boundary must not step.
+     */
+    printf("a new gate picks up the gain it inherits:\n");
+    {
+        tg_core_t *c = tg_core_create(44100.0);
+        tg_core_set_param(c, "rate",    "1/16");
+        tg_core_set_param(c, "length",  "1");      /* two steps */
+        tg_core_set_param(c, "pattern", "3");      /* both on */
+        tg_core_set_param(c, "ties",    "0");      /* ...and NOT tied: it retriggers */
+        tg_core_set_param(c, "attack",  "50");
+        tg_core_set_param(c, "decay",   "0");
+        tg_core_set_param(c, "sustain", "1");
+        tg_core_set_param(c, "release", "0");
+        tg_core_set_param(c, "hold",    "1");      /* open for the whole step */
+        tg_core_set_param(c, "amount",  "1");
+        tg_core_set_param(c, "cursor", "0");
+        tg_core_set_param(c, "step_amount", "1.00");
+        tg_core_set_param(c, "cursor", "1");
+        tg_core_set_param(c, "step_amount", "0.25");
+
+        const int spb = (int)(44100.0 * 0.125);
+        float *buf = render_dc(c, spb * 2, 120.0f);
+
+        /* Either side of the boundary, a couple of samples clear of it. */
+        const double before = buf[spb - 4];
+        const double after  = buf[spb + 4];
+        printf("      gain before %.3f, after %.3f\n", before, after);
+        check_near("the gain does not step at the retrigger", after, before, 0.02);
+
+        /* ...and it then RAMPS to the new step's level over the attack,
+         * rather than sitting where it was. Halfway through 50 ms it is on
+         * its way down from 1.00 to 0.25. */
+        const double mid = buf[spb + (int)(44100.0 * 0.025)];
+        check("...then ramps down to the new level", mid < before - 0.1 && mid > 0.25);
+
+        free(buf);
+        tg_core_destroy(c);
+    }
+
     printf(failures ? "\nFAILED (%d)\n" : "\nPASS\n", failures);
     return failures ? 1 : 0;
 }

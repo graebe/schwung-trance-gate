@@ -506,7 +506,31 @@ static void on_step_boundary(tg_instance_t *in, const tg_pattern_t *p,
              * boundary knows which step struck; env_enter is also reached
              * from the zero-length stage walk and from RELEASE, neither of
              * which starts a gate. */
-            in->step_level = (float)p->depth[new_step] * (1.0f / 255.0f);
+            const float lvl = (float)p->depth[new_step] * (1.0f / 255.0f);
+
+            /*
+             * THE ATTACK STARTS WHERE THE GAIN IS, NOT WHERE `env` IS.
+             *
+             * `env` is only half the gain: what you hear is `env * level`,
+             * and the level changes at this very boundary. att_from carries
+             * `env` across, so after a half-filled pad the envelope resumed
+             * at the right ENV and instantly the wrong GAIN -- a step from
+             * env*0.5 to env*1.0 in one sample, which is the click the
+             * att_from ramp was added to prevent, arriving through the other
+             * factor.
+             *
+             * Converting env into the new level's units fixes it: the gain is
+             * identical either side and the attack ramps on from there.
+             *
+             * `env` may land ABOVE 1 -- a loud pad followed by a quiet one --
+             * and that is not a special case: the attack is a lerp from
+             * att_from to 1, so it ramps DOWN to the new level over the
+             * attack time instead of up. Bounded by 1/level, so at worst 255
+             * for the quietest pad there is.
+             */
+            const double gain_now = (double)in->env * (double)in->step_level;
+            in->step_level = lvl;
+            in->env = (lvl > 1.0e-6f) ? (float)(gain_now / (double)lvl) : 0.0f;
             env_enter(in, TG_ATTACK);
         }
     } else if (on_prev || in->env_stage != TG_IDLE) {
