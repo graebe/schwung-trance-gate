@@ -183,6 +183,13 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         "{\"key\":\"time_mode\",\"name\":\"Env Time\",\"short_name\":\"Time\","
           "\"type\":\"enum\","
           "\"options\":[\"ms\",\"% Step\"],\"wire_format\":\"index\",\"default\":\"0\"},"
+        /* The PATH each stage takes between its endpoints -- the stage still
+         * starts and ends where it did and still takes as long. See
+         * env_shape in the engine. */
+        "{\"key\":\"curve\",\"name\":\"Env Curve\",\"short_name\":\"Curve\","
+          "\"type\":\"enum\","
+          "\"options\":[\"Linear\",\"Exponential\",\"S-Curve\"],"
+          "\"wire_format\":\"index\",\"default\":\"0\"},"
         "{\"key\":\"attack\",\"name\":\"Att\",\"type\":\"float\",\"min\":0,\"max\":500,"
           "\"default\":2,\"step\":1,\"unit\":\"ms\","
           "\"viz\":{\"group\":\"adsr\",\"role\":\"attack\",\"kind\":\"envelope\"}},"

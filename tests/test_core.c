@@ -510,6 +510,114 @@ int main(void) {
         tg_core_destroy(c);
     }
 
+    /*
+     * THE CURVE SHAPES. Every stage's path depends on three properties, so
+     * they are asserted rather than assumed: the endpoints are pinned (a
+     * stage must still start and end where it did), the shape is monotonic
+     * (a gate that dipped mid-attack would be a fault nobody would look for
+     * here), and the inverse is exact (it is what keeps a mid-gate change
+     * from clicking).
+     */
+    printf("envelope curve shapes:\n");
+    {
+        const int curves[] = { 0, 1, 2 };
+        const char *names[] = { "linear", "exponential", "s-curve" };
+        int ends = 1, mono = 1, inv = 1;
+        double worstInv = 0.0;
+
+        for (int ci = 0; ci < 3; ci++) {
+            const int c = curves[ci];
+            if (tg_test_shape(c, 0.0) != 0.0 || tg_test_shape(c, 1.0) != 1.0) ends = 0;
+            double prev = -1.0;
+            for (int i = 0; i <= 1000; i++) {
+                const double t = (double)i / 1000.0;
+                const double w = tg_test_shape(c, t);
+                if (w < prev - 1e-12) mono = 0;
+                prev = w;
+                const double back = tg_test_shape_inv(c, w);
+                const double e = fabs(back - t);
+                if (e > worstInv) worstInv = e;
+                if (e > 1e-6) inv = 0;
+            }
+            (void)names[ci];
+        }
+        check("every shape runs 0 to 1 exactly", ends);
+        check("every shape is monotonic over 1000 points", mono);
+        check_near("the inverse round-trips (worst error x1e6)",
+                   worstInv * 1e6, 0.0, 1.0);
+        check("...so a mid-gate curve change can re-anchor exactly", inv);
+
+        /* The shapes are what they claim: exponential rises FASTER than
+         * linear early (it eases into its target), and the s-curve is slower
+         * than linear in its first half and faster in its second. */
+        check("exponential is ahead of linear at the midpoint",
+              tg_test_shape(1, 0.5) > 0.6);
+        check("the s-curve starts behind linear", tg_test_shape(2, 0.25) < 0.25);
+        check("...and finishes ahead of it",      tg_test_shape(2, 0.75) > 0.75);
+        printf("      exp(0.5)=%.3f  s(0.25)=%.3f  s(0.75)=%.3f\n",
+               tg_test_shape(1, 0.5), tg_test_shape(2, 0.25), tg_test_shape(2, 0.75));
+    }
+
+    /*
+     * CHANGING THE CURVE UNDER A LIVE GATE MUST NOT STEP THE GAIN. The whole
+     * reason env_t is re-anchored rather than left alone; without it a swap
+     * mid-attack moves the level from 0.50 to 0.82 in one sample.
+     */
+    printf("a curve change mid-gate is silent:\n");
+    {
+        double worst = 0.0;
+        for (int from = 0; from < 3; from++) {
+            for (int to = 0; to < 3; to++) {
+                if (from == to) continue;
+                tg_core_t *c = tg_core_create(44100.0);
+                tg_core_set_param(c, "rate",    "1/4");    /* a long step */
+                tg_core_set_param(c, "length",  "0");
+                tg_core_set_param(c, "pattern", "1");
+                tg_core_set_param(c, "ties",    "0");
+                tg_core_set_param(c, "attack",  "200");    /* mid-attack when we swap */
+                tg_core_set_param(c, "decay",   "0");
+                tg_core_set_param(c, "sustain", "1");
+                tg_core_set_param(c, "release", "0");
+                tg_core_set_param(c, "hold",    "1");
+                tg_core_set_param(c, "amount",  "1");
+                { char v[8]; snprintf(v, sizeof(v), "%d", from);
+                  tg_core_set_param(c, "curve", v); }
+
+                /* Run a quarter of a second in, landing inside the attack. */
+                float *a = render_dc(c, 4410, 120.0f);
+                const float before = a[4409];
+                free(a);
+
+                { char v[8]; snprintf(v, sizeof(v), "%d", to);
+                  tg_core_set_param(c, "curve", v); }
+
+                float *b = render_dc(c, 64, 120.0f);
+                const double jump = fabs((double)b[0] - (double)before);
+                if (jump > worst) worst = jump;
+                free(b);
+                tg_core_destroy(c);
+            }
+        }
+        printf("      worst jump across all six swaps: %.6f\n", worst);
+        check("no swap moves the gain by more than 1e-3", worst < 1e-3);
+    }
+
+    /* A patch written before curves existed says nothing about them, and
+     * straight lines are what those patches sounded like. */
+    printf("an old patch still means straight lines:\n");
+    {
+        tg_core_t *c = tg_core_create(44100.0);
+        tg_core_set_param(c, "curve", "2");
+        tg_core_set_param(c, "state",
+            "{\"sv\":3,\"slot\":0,\"rate\":\"1/16\",\"attack\":2.00,"
+            "\"decay\":20.00,\"sustain\":1.000,\"release\":20.00,"
+            "\"hold\":1.000,\"amount\":1.000,\"legato\":0}");
+        char buf[16];
+        tg_core_get_param(c, "curve", buf, sizeof(buf));
+        check("a blob with no curve key loads as linear", atoi(buf) == 0);
+        tg_core_destroy(c);
+    }
+
     printf(failures ? "\nFAILED (%d)\n" : "\nPASS\n", failures);
     return failures ? 1 : 0;
 }

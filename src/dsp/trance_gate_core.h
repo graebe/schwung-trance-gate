@@ -113,6 +113,13 @@ int  tg_core_get_param(tg_core_t *c, const char *key, char *buf, int buf_len);
  */
 #define TG_STATE_MAX 4096
 
+/* The envelope's curve shapes, and the warp each one applies to a stage's
+ * 0..1 progress. Exposed for the tests: the properties every stage depends on
+ * are cheaper to assert here than to infer from rendered audio. */
+enum { TG_CURVE_LINEAR = 0, TG_CURVE_EXP = 1, TG_CURVE_SCURVE = 2 };
+double tg_test_shape(int curve, double t);
+double tg_test_shape_inv(int curve, double w);
+
 void tg_core_on_midi(tg_core_t *c, const uint8_t *msg, int len);
 
 #ifdef __cplusplus

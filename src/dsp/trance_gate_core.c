@@ -95,6 +95,92 @@ _Static_assert(TG_STATE_WORST_CASE < TG_STATE_MAX,
 
 enum { TG_IDLE = 0, TG_ATTACK, TG_DECAY, TG_SUSTAIN, TG_RELEASE };
 
+/*
+ * THE ENVELOPE'S SHAPE, AS A WARP ON TIME.
+ *
+ * Every stage already has the form `f(env_t)` with env_t running 0..1 across
+ * it, so a curve is not three new formulas -- it is one function substituted
+ * for env_t in the three that exist:
+ *
+ *   ATTACK   env = att_from + (1 - att_from) * w
+ *   DECAY    env = 1        - (1 - sustain)  * w
+ *   RELEASE  env = rel_from * (1 - w)
+ *
+ * Every shape obeys shape(0)=0, shape(1)=1 and is monotonic, so a stage still
+ * starts and ends exactly where it did and still takes the time it was given.
+ * Only the path between changes.
+ *
+ * LINEAR RETURNS t UNTOUCHED, which is what keeps the reference render
+ * bit-identical: the three expressions above are then the same operations on
+ * the same values in the same order as before this existed. It is also why
+ * they are not tidied into a shared lerp -- `rel_from * (1 - w)` and
+ * `rel_from - rel_from * w` are one number in algebra and two in floating
+ * point.
+ *
+ * The three names live in the header, where the tests can reach them.
+ */
+
+/* The bend. Chosen so the curve is clearly audible without being a step:
+ * halfway through an exponential stage the envelope is ~82% of the way. */
+#define TG_CURVE_K 3.0
+
+/* Fast, then easing into the target -- what "exponential envelope" means on
+ * hardware, and the direction every stage takes because the three expressions
+ * above already point it the right way for each. */
+static inline double curve_exp(double t) {
+    static const double denom = 0.95021293163213605;   /* 1 - exp(-3) */
+    return (1.0 - exp(-TG_CURVE_K * t)) / denom;
+}
+static inline double curve_exp_inv(double w) {
+    static const double denom = 0.95021293163213605;
+    double x = 1.0 - w * denom;
+    if (x <= 1e-12) return 1.0;
+    return -log(x) / TG_CURVE_K;
+}
+
+static inline double env_shape(int curve, double t) {
+    if (t <= 0.0) return 0.0;
+    if (t >= 1.0) return 1.0;
+    switch (curve) {
+    case TG_CURVE_EXP: return curve_exp(t);
+    case TG_CURVE_SCURVE:
+        /* TWO EXPONENTIALS, JOINED. The first half is the exponential
+         * mirrored (slow, then accelerating), the second is it the right way
+         * up -- so the pair is slow-fast-slow and meets in the middle at the
+         * same slope, Einv'(1) being E'(0). A corner there would be a kink in
+         * the gain, which is audible as surely as a step. */
+        return (t < 0.5) ? 0.5 * (1.0 - curve_exp(1.0 - 2.0 * t))
+                         : 0.5 + 0.5 * curve_exp(2.0 * t - 1.0);
+    default: return t;
+    }
+}
+
+/* The inverse, which is what lets the curve change mid-gate without a click:
+ * see the re-anchor in set_param. Monotonic and analytic for all three. */
+static inline double env_shape_inv(int curve, double w) {
+    if (w <= 0.0) return 0.0;
+    if (w >= 1.0) return 1.0;
+    switch (curve) {
+    case TG_CURVE_EXP: return curve_exp_inv(w);
+    case TG_CURVE_SCURVE:
+        return (w < 0.5) ? 0.5 * (1.0 - curve_exp_inv(1.0 - 2.0 * w))
+                         : 0.5 + 0.5 * curve_exp_inv(2.0 * w - 1.0);
+    default: return w;
+    }
+}
+
+/*
+ * THE SHAPES, VISIBLE TO THE TESTS.
+ *
+ * env_shape is static inline and belongs that way -- it runs per sample. But
+ * the properties the whole envelope rests on (endpoints, monotonicity, an
+ * exact inverse) are worth asserting directly rather than inferred from
+ * rendered audio, where a broken shape would show up as "the gate sounds
+ * odd". Two thin wrappers with external linkage, declared in the header.
+ */
+double tg_test_shape(int curve, double t)     { return env_shape(curve, t); }
+double tg_test_shape_inv(int curve, double w) { return env_shape_inv(curve, w); }
+
 /* What the envelope's three time values mean; see stage_samples. */
 enum { TG_TIME_MS = 0, TG_TIME_PCT = 1 };
 
@@ -233,6 +319,9 @@ typedef struct tg_instance {
     /* TG_TIME_MS or TG_TIME_PCT -- what attack/decay/release MEAN. See
      * stage_samples. */
     int    time_mode;
+    /* TG_CURVE_* -- the path each stage takes between its endpoints. See
+     * env_shape. */
+    int    curve;
     /* The shell's, not a constant. Changing it only rescales derived lengths,
      * so it is safe to set from prepareToPlay. */
     double sample_rate;
@@ -361,23 +450,28 @@ static void env_enter(tg_instance_t *in, int stage) {
 }
 
 static inline void env_advance(tg_instance_t *in) {
+    /* The shape, evaluated once and substituted for env_t below. Linear hands
+     * back env_t itself, so those three lines stay the arithmetic they were.
+     * See env_shape. */
+    const double w = env_shape(in->curve, in->env_t);
+
     switch (in->env_stage) {
     case TG_ATTACK:
         /* FROM WHERE IT IS, not from zero -- the same thing RELEASE does with
          * rel_from. It still REACHES 1.0 and still takes attack_ms to get
          * there; it simply does not fall off a cliff first. */
-        in->env = (float)(in->att_from + (1.0 - in->att_from) * in->env_t);
+        in->env = (float)(in->att_from + (1.0 - in->att_from) * w);
         if ((in->env_t += in->env_inc) >= 1.0) { in->env = 1.0f; env_enter(in, TG_DECAY); }
         break;
     case TG_DECAY:
-        in->env = (float)(1.0 - (1.0 - in->sustain) * in->env_t);
+        in->env = (float)(1.0 - (1.0 - in->sustain) * w);
         if ((in->env_t += in->env_inc) >= 1.0) { in->env = in->sustain; env_enter(in, TG_SUSTAIN); }
         break;
     case TG_SUSTAIN:
         in->env = in->sustain;
         break;
     case TG_RELEASE:
-        in->env = (float)(in->rel_from * (1.0 - in->env_t));
+        in->env = (float)(in->rel_from * (1.0 - w));
         if ((in->env_t += in->env_inc) >= 1.0) { in->env = 0.0f; env_enter(in, TG_IDLE); }
         break;
     case TG_IDLE:
@@ -798,6 +892,32 @@ void tg_core_set_param(tg_core_t *instance, const char *key, const char *val) {
     } else if (strcmp(key, "legato") == 0) {
         in->legato = (strcmp(val, "On") == 0 || strcmp(val, "on") == 0 ||
                       atoi(val) != 0) ? 1 : 0;
+    } else if (strcmp(key, "curve") == 0) {
+        int c = TG_CURVE_LINEAR;
+        if (strcmp(val, "Exponential") == 0 || strcmp(val, "Exp") == 0) c = TG_CURVE_EXP;
+        else if (strcmp(val, "S-Curve") == 0 || strcmp(val, "S") == 0)  c = TG_CURVE_SCURVE;
+        else c = atoi(val);
+        if (c < TG_CURVE_LINEAR || c > TG_CURVE_SCURVE) c = TG_CURVE_LINEAR;
+
+        /*
+         * RE-ANCHOR, OR THE CHANGE IS A CLICK.
+         *
+         * env_t is a position along the STAGE, and the shape decides what
+         * level that position means. Halfway through a stage is 0.50 linear
+         * and 0.82 exponential, so swapping the shape under a live gate moves
+         * the gain instantly -- a step, which is exactly the fault the attack
+         * ramp and the level latch were both added to avoid.
+         *
+         * Solving shape_new(t') = shape_old(env_t) keeps the LEVEL and
+         * changes only the trajectory from here. All three shapes are
+         * monotonic and analytically invertible, and Linear's inverse is the
+         * identity, so the common case costs nothing.
+         */
+        if (c != in->curve) {
+            if (in->env_t > 0.0 && in->env_t < 1.0)
+                in->env_t = env_shape_inv(c, env_shape(in->curve, in->env_t));
+            in->curve = c;
+        }
     } else if (strcmp(key, "time_mode") == 0) {
         /* Names as well as the index: the Move shell wires this enum by index
          * while a patch or a plugin may well say what it means. */
@@ -853,6 +973,13 @@ void tg_core_set_param(tg_core_t *instance, const char *key, const char *val) {
         in->time_mode = TG_TIME_MS;
         if (json_get_number(val, "tmode", &n) == 0)
             in->time_mode = (n >= 0.5) ? TG_TIME_PCT : TG_TIME_MS;
+        /* Absent in a pre-curve blob, and straight lines are what those
+         * patches sounded like. */
+        in->curve = TG_CURVE_LINEAR;
+        if (json_get_number(val, "curve", &n) == 0) {
+            int c = (int)(n + 0.5);
+            in->curve = (c >= TG_CURVE_LINEAR && c <= TG_CURVE_SCURVE) ? c : TG_CURVE_LINEAR;
+        }
         if (json_get_number(val, "hold", &n) == 0) in->hold = clampf((float)n, 0.0f, 1.0f);
         /*
          * THREE SPELLINGS OF ONE VALUE, AND THE OLD PAIR MULTIPLIES.
@@ -942,6 +1069,7 @@ int tg_core_get_param(tg_core_t *instance, const char *key, char *buf, int buf_l
     if (strcmp(key, "amount") == 0)  return snprintf(buf, buf_len, "%.2f", in->amount);
     if (strcmp(key, "legato") == 0)  return snprintf(buf, buf_len, "%d", in->legato);
     if (strcmp(key, "time_mode") == 0) return snprintf(buf, buf_len, "%d", in->time_mode);
+    if (strcmp(key, "curve") == 0)   return snprintf(buf, buf_len, "%d", in->curve);
     /* The step's length in ms, so a shell can show what a % actually costs
      * without duplicating the rate table. */
     if (strcmp(key, "ms_per_step") == 0)
@@ -1018,10 +1146,11 @@ int tg_core_get_param(tg_core_t *instance, const char *key, char *buf, int buf_l
         int n = snprintf(buf, buf_len,
             "{\"sv\":%d,\"slot\":%d,\"rate\":\"%s\","
             "\"attack\":%.2f,\"decay\":%.2f,\"sustain\":%.3f,\"release\":%.2f,"
-            "\"hold\":%.3f,\"amount\":%.3f,\"legato\":%d,\"tmode\":%d",
+            "\"hold\":%.3f,\"amount\":%.3f,\"legato\":%d,\"tmode\":%d,"
+            "\"curve\":%d",
             TG_STATE_VERSION, in->slot, tg_rates[in->rate_idx].label,
             in->attack_ms, in->decay_ms, in->sustain, in->release_ms,
-            in->hold, in->amount, in->legato, in->time_mode);
+            in->hold, in->amount, in->legato, in->time_mode, in->curve);
         for (int s = 0; s < TG_SLOTS && n > 0 && n < buf_len; s++) {
             char stx[40], tix[40];
             mask_to_hex(&in->pat[s].steps, stx, sizeof(stx));

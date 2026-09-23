@@ -170,7 +170,7 @@ const HIERARCHY = JSON.stringify({
                      * grid behind it. `time_mode` sits with Length and Rate
                      * because it is the same kind of thing -- how the
                      * envelope's times are measured, not what they are. */
-                    "length", "rate", "time_mode"],
+                    "length", "rate", "time_mode", "curve"],
             params: ["gate"]
         }
     }
