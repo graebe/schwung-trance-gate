@@ -77,7 +77,10 @@
  * patterns stay far inside 1024 even at full length. tests/test_core.c pins
  * where the boundary actually falls rather than leaving it to be discovered.
  */
-#define TG_STATE_HEADER_MAX 160
+/* 144 at worst today (every field at its longest, "1/16T" as the rate);
+ * raised from 160 when "tmode" was added so the margin stays a margin rather
+ * than something to recount on the next field. */
+#define TG_STATE_HEADER_MAX 192
 #define TG_STATE_WORST_CASE \
     (TG_STATE_HEADER_MAX + TG_SLOTS * (sizeof(",\"p0\":\"\"") + TG_STATE_FIELD_EMIT))
 _Static_assert(TG_STATE_WORST_CASE <= 8192,
@@ -91,6 +94,9 @@ _Static_assert(TG_STATE_WORST_CASE < TG_STATE_MAX,
                "encoding; every embedder's get_param buffer would truncate");
 
 enum { TG_IDLE = 0, TG_ATTACK, TG_DECAY, TG_SUSTAIN, TG_RELEASE };
+
+/* What the envelope's three time values mean; see stage_samples. */
+enum { TG_TIME_MS = 0, TG_TIME_PCT = 1 };
 
 /* ---------------------------------------------------------------- rates --
  *
@@ -188,6 +194,25 @@ typedef struct tg_instance {
      * consecutive ON steps clicked at every boundary -- which is what made it
      * read as intermittent. */
     float  att_from;      /* env level when ATTACK began */
+    /*
+     * THE STRUCK STEP'S LEVEL, HELD FOR THE WHOLE GATE.
+     *
+     * This used to be read fresh every sample as depth[current_step], which
+     * is wrong in the two places where a gate and a step are not the same
+     * span:
+     *
+     *   a RELEASE that runs past the step edge was scaled by the NEXT step's
+     *   amount, so pulling a pad down to 50% quietened the body of its
+     *   envelope and left the tail at whatever came after it;
+     *
+     *   a TIE holds one gate across a boundary, and the level stepped
+     *   mid-gate -- a discontinuity in the gain, which is a click.
+     *
+     * Latched when the envelope enters ATTACK -- the moment a gate opens --
+     * and held until it returns to IDLE. One gate, one level. A level contour
+     * is what NOT tying gives you.
+     */
+    float  step_level;
 
     /* Published for the UI, computed once per block. Held here rather than
      * recomputed in get_param because get_param runs on the audio callback
@@ -205,6 +230,9 @@ typedef struct tg_instance {
     /* Adjacent ON steps hold as ONE gate instead of re-articulating -- every
      * such pair behaves as if it were tied. See on_step_boundary. */
     int    legato;
+    /* TG_TIME_MS or TG_TIME_PCT -- what attack/decay/release MEAN. See
+     * stage_samples. */
+    int    time_mode;
     /* The shell's, not a constant. Changing it only rescales derived lengths,
      * so it is safe to set from prepareToPlay. */
     double sample_rate;
@@ -273,6 +301,25 @@ static inline double ms_to_samples(const tg_instance_t *in, float ms) {
 }
 
 /*
+ * HOW LONG A STAGE LASTS, in the unit the patch is written in.
+ *
+ * TG_TIME_MS   the value IS milliseconds. Absolute: the same envelope is a
+ *              gentle swell at 1/4 and is never finished at 1/32.
+ * TG_TIME_PCT  the value is 0..500 read as 0..100% OF THE STEP, so the shape
+ *              survives a change of rate or tempo intact. The scale is shared
+ *              with ms on purpose -- 250 is "250 ms" or "50%" depending only
+ *              on the mode, so switching modes never moves a knob.
+ *
+ * ms_per_step is maintained by tg_block_setup and seeded at construction, so
+ * it is correct here before any audio has run.
+ */
+static inline double stage_samples(const tg_instance_t *in, float value) {
+    if (in->time_mode != TG_TIME_PCT) return ms_to_samples(in, value);
+    return (double)value * (1.0f / 500.0f)
+         * (double)in->ms_per_step * (in->sample_rate / 1000.0);
+}
+
+/*
  * Entering a stage, with zero-length stages walked THROUGH rather than
  * recursed through.
  *
@@ -289,10 +336,10 @@ static void env_enter(tg_instance_t *in, int stage) {
 
         double len;
         switch (stage) {
-        case TG_ATTACK:  len = ms_to_samples(in, in->attack_ms);
+        case TG_ATTACK:  len = stage_samples(in, in->attack_ms);
                          in->att_from = in->env;                      break;
-        case TG_DECAY:   len = ms_to_samples(in, in->decay_ms);           break;
-        case TG_RELEASE: len = ms_to_samples(in, in->release_ms);
+        case TG_DECAY:   len = stage_samples(in, in->decay_ms);           break;
+        case TG_RELEASE: len = stage_samples(in, in->release_ms);
                          in->rel_from = in->env;                      break;
         default:         len = 0.0;                                   break;
         }
@@ -358,7 +405,16 @@ static void on_step_boundary(tg_instance_t *in, const tg_pattern_t *p,
          * where a retrigger actually re-articulates -- worth knowing before
          * concluding the switch does nothing.
          */
-        if (!(on_prev && (tied || in->legato))) env_enter(in, TG_ATTACK);
+        if (!(on_prev && (tied || in->legato))) {
+            /* A GATE IS OPENING, so this step's amount becomes the gate's for
+             * as long as it lives -- including a release that outlives the
+             * step. Latched HERE and not inside env_enter because only the
+             * boundary knows which step struck; env_enter is also reached
+             * from the zero-length stage walk and from RELEASE, neither of
+             * which starts a gate. */
+            in->step_level = (float)p->depth[new_step] * (1.0f / 255.0f);
+            env_enter(in, TG_ATTACK);
+        }
     } else if (on_prev || in->env_stage != TG_IDLE) {
         env_enter(in, TG_RELEASE);
     }
@@ -495,9 +551,12 @@ static inline float tg_next_gain(tg_instance_t *in, tg_run_t *r) {
     /* The step's amount is how far the gate OPENS, not how far it closes:
      *     m = 1 - amount * (1 - env * level)
      * level 0 is silent, an OFF step is a gap whatever its level (env is 0
-     * there, so the term vanishes), and the global amount is the dry/wet. */
-    float level = (float)p->depth[r->step] * (1.0f / 255.0f);
-    float m = 1.0f - in->amount * (1.0f - in->env * level);
+     * there, so the term vanishes), and the global amount is the dry/wet.
+     *
+     * `step_level` is the STRUCK step's, latched at gate-open -- not
+     * depth[r->step], which is a different number the moment a release or a
+     * tie outlives the step that started it. See its declaration. */
+    float m = 1.0f - in->amount * (1.0f - in->env * in->step_level);
 
     in->step_pos += r->inc;
     r->frac += r->inc;
@@ -739,6 +798,12 @@ void tg_core_set_param(tg_core_t *instance, const char *key, const char *val) {
     } else if (strcmp(key, "legato") == 0) {
         in->legato = (strcmp(val, "On") == 0 || strcmp(val, "on") == 0 ||
                       atoi(val) != 0) ? 1 : 0;
+    } else if (strcmp(key, "time_mode") == 0) {
+        /* Names as well as the index: the Move shell wires this enum by index
+         * while a patch or a plugin may well say what it means. */
+        in->time_mode = (strcmp(val, "%") == 0 || strcmp(val, "Step") == 0 ||
+                         strcmp(val, "step") == 0 || atoi(val) != 0)
+                      ? TG_TIME_PCT : TG_TIME_MS;
     } else if (strcmp(key, "pattern") == 0) {
         set_pattern_hex(&p->steps, val);
     } else if (strcmp(key, "ties") == 0) {
@@ -782,6 +847,12 @@ void tg_core_set_param(tg_core_t *instance, const char *key, const char *val) {
          * had -- so an old patch loads sounding exactly as it did. */
         in->legato = 0;
         if (json_get_number(val, "legato", &n) == 0) in->legato = (n >= 0.5) ? 1 : 0;
+        /* Absent in a pre-% blob, and MS is what those patches meant -- so an
+         * old patch loads sounding exactly as it did, with no version bump
+         * needed to say so. */
+        in->time_mode = TG_TIME_MS;
+        if (json_get_number(val, "tmode", &n) == 0)
+            in->time_mode = (n >= 0.5) ? TG_TIME_PCT : TG_TIME_MS;
         if (json_get_number(val, "hold", &n) == 0) in->hold = clampf((float)n, 0.0f, 1.0f);
         /*
          * THREE SPELLINGS OF ONE VALUE, AND THE OLD PAIR MULTIPLIES.
@@ -870,6 +941,11 @@ int tg_core_get_param(tg_core_t *instance, const char *key, char *buf, int buf_l
     if (strcmp(key, "hold") == 0)    return snprintf(buf, buf_len, "%.2f", in->hold);
     if (strcmp(key, "amount") == 0)  return snprintf(buf, buf_len, "%.2f", in->amount);
     if (strcmp(key, "legato") == 0)  return snprintf(buf, buf_len, "%d", in->legato);
+    if (strcmp(key, "time_mode") == 0) return snprintf(buf, buf_len, "%d", in->time_mode);
+    /* The step's length in ms, so a shell can show what a % actually costs
+     * without duplicating the rate table. */
+    if (strcmp(key, "ms_per_step") == 0)
+        return snprintf(buf, buf_len, "%.2f", in->ms_per_step);
     if (strcmp(key, "cursor") == 0) return snprintf(buf, buf_len, "%d", in->cursor);
     if (strcmp(key, "step") == 0) {
         const char *w = !tg_mask_get(&p->steps, in->cursor) ? "Off"
@@ -942,10 +1018,10 @@ int tg_core_get_param(tg_core_t *instance, const char *key, char *buf, int buf_l
         int n = snprintf(buf, buf_len,
             "{\"sv\":%d,\"slot\":%d,\"rate\":\"%s\","
             "\"attack\":%.2f,\"decay\":%.2f,\"sustain\":%.3f,\"release\":%.2f,"
-            "\"hold\":%.3f,\"amount\":%.3f,\"legato\":%d",
+            "\"hold\":%.3f,\"amount\":%.3f,\"legato\":%d,\"tmode\":%d",
             TG_STATE_VERSION, in->slot, tg_rates[in->rate_idx].label,
             in->attack_ms, in->decay_ms, in->sustain, in->release_ms,
-            in->hold, in->amount, in->legato);
+            in->hold, in->amount, in->legato, in->time_mode);
         for (int s = 0; s < TG_SLOTS && n > 0 && n < buf_len; s++) {
             char stx[40], tix[40];
             mask_to_hex(&in->pat[s].steps, stx, sizeof(stx));

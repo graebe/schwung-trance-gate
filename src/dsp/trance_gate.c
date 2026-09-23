@@ -170,8 +170,19 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         /* Adjacent ON steps hold as one gate rather than re-articulating. Audible
          * below Sustain 100%; at 100% the attack already ramps from a fully
          * open gate and there is nothing to hear. */
-        "{\"key\":\"legato\",\"name\":\"Legato\",\"type\":\"enum\","
+        /* THE KEY STAYS `legato`. It is in every saved patch, it is the
+         * plugin's automation parameter id, and Live's saved automation
+         * references that id -- so only the NAME moves. "Join" is what fits a
+         * cell; the long form is what the plugin has room for. */
+        "{\"key\":\"legato\",\"name\":\"Join Neighbors\",\"short_name\":\"Join\","
+          "\"type\":\"enum\","
           "\"options\":[\"Off\",\"On\"],\"wire_format\":\"index\",\"default\":\"0\"},"
+        /* What Att/Dec/Rel MEAN: milliseconds, or a share of the step. In %
+         * the envelope keeps its shape at every rate instead of being cut off
+         * at the fast ones -- see stage_samples in the engine. */
+        "{\"key\":\"time_mode\",\"name\":\"Env Time\",\"short_name\":\"Time\","
+          "\"type\":\"enum\","
+          "\"options\":[\"ms\",\"% Step\"],\"wire_format\":\"index\",\"default\":\"0\"},"
         "{\"key\":\"attack\",\"name\":\"Att\",\"type\":\"float\",\"min\":0,\"max\":500,"
           "\"default\":2,\"step\":1,\"unit\":\"ms\","
           "\"viz\":{\"group\":\"adsr\",\"role\":\"attack\",\"kind\":\"envelope\"}},"

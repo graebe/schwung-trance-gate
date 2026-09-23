@@ -26,7 +26,12 @@ cc -std=c11 -Wall -Wextra -Isrc/dsp \
 #
 # If this fires and the change to the audio was DELIBERATE, re-record the
 # hash with `tests/render_ref > /tmp/ref.raw` and say so in the commit.
-GOLDEN=b208becc62657c9748247b9daa7b0362
+# Re-recorded 2026-09-23 when the per-step level became latched at gate-open.
+# The diff was confined to steps 2 and 6 -- the steps FOLLOWING the golden
+# patch's ties at 1 and 5, where the level used to jump mid-gate to the new
+# step's amount. That jump was the bug; everything else is byte-identical.
+# Previous: b208becc62657c9748247b9daa7b0362
+GOLDEN=8e4892aa8e3947594e91cf966f7ddc98
 cc -std=c11 -Wall -Wextra -Wno-unused-parameter -Isrc/dsp \
    tests/render_ref.c src/dsp/trance_gate.c src/dsp/trance_gate_core.c \
    -o build/render_ref -lm

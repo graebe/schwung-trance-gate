@@ -166,7 +166,11 @@ const HIERARCHY = JSON.stringify({
             children: null,
             knobs: ["slot", "amount", "step_amount",
                     "attack", "decay", "sustain", "release", "hold",
-                    "length", "rate"],
+                    /* Past the ring page's first eight, so these land on the
+                     * grid behind it. `time_mode` sits with Length and Rate
+                     * because it is the same kind of thing -- how the
+                     * envelope's times are measured, not what they are. */
+                    "length", "rate", "time_mode"],
             params: ["gate"]
         }
     }

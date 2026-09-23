@@ -38,6 +38,30 @@ static double ui_field(tg_core_t *c, int index) {
     return atof(p);
 }
 
+/*
+ * `frames` frames of DC through the SPLIT path, transport running, returned
+ * as one float per frame. Callers free it.
+ *
+ * Split and not interleaved on purpose: with the interleaved path an index
+ * into the buffer is half a frame, and a test that indexes it as if it were
+ * mono reads the first half of its render twice over -- which is subtle,
+ * plausible-looking, and quietly passed against the level-latching bug.
+ */
+static float *render_dc(tg_core_t *c, int frames, float bpm) {
+    float *l = (float *)malloc(sizeof(float) * (size_t)frames);
+    float *r = (float *)malloc(sizeof(float) * (size_t)frames);
+    tg_transport_t t;
+    t.running = 1; t.bpm = bpm;
+    for (int off = 0; off < frames; off += 64) {
+        int n = (frames - off) < 64 ? (frames - off) : 64;
+        for (int i = 0; i < n; i++) { l[off + i] = 1.0f; r[off + i] = 1.0f; }
+        t.beats = (double)off / 44100.0 * ((double)bpm / 60.0);
+        tg_core_process_f32_split(c, l + off, r + off, n, &t);
+    }
+    free(r);
+    return l;
+}
+
 /* A gate that is fully open on step 0 and fully shut on step 1, with no
  * envelope at all -- so the first sample that drops tells us exactly where the
  * step boundary fell, in samples. */
@@ -350,6 +374,139 @@ int main(void) {
         check_near("a block hands over the host's real tempo",
                    ui_field(c, 4), 60000.0 / 174.0, 1.0);
 
+        tg_core_destroy(c);
+    }
+
+    /*
+     * THE STRUCK STEP'S LEVEL OWNS THE WHOLE GATE.
+     *
+     * The level used to be read as depth[current_step] every sample, so a
+     * release that outlived its step was scaled by the NEXT step's amount --
+     * pulling a pad to 25% quietened the body of its envelope and left the
+     * tail at whatever followed. Two steps at 100% and 25% and a release long
+     * enough to cross the boundary is the smallest case that shows it.
+     */
+    printf("the level is latched at gate-open:\n");
+    {
+        tg_core_t *c = tg_core_create(44100.0);
+        tg_core_set_param(c, "rate",    "1/16");
+        tg_core_set_param(c, "length",  "1");      /* index -> 2 steps */
+        tg_core_set_param(c, "pattern", "1");      /* step 0 on, step 1 off */
+        tg_core_set_param(c, "ties",    "0");
+        tg_core_set_param(c, "attack",  "0");
+        tg_core_set_param(c, "decay",   "0");
+        tg_core_set_param(c, "sustain", "1");
+        tg_core_set_param(c, "hold",    "1");
+        tg_core_set_param(c, "amount",  "1");
+        /* Step 0 struck at a QUARTER, step 1 (where the tail lands) at full. */
+        tg_core_set_param(c, "cursor", "0");
+        tg_core_set_param(c, "step_amount", "0.25");
+        tg_core_set_param(c, "cursor", "1");
+        tg_core_set_param(c, "step_amount", "1.00");
+        /* One step is 125 ms at 120 BPM; a 60 ms release from the step edge
+         * spends half its life inside step 1. */
+        tg_core_set_param(c, "release", "60");
+
+        /* Two steps of DC through the SPLIT path, so an index is a frame and
+         * not half of one -- the interleaved path with mono indexing is how
+         * the first draft of this test passed against the very bug it is
+         * here to catch. */
+        const int spb = (int)(44100.0 * 0.125);
+        float *buf = render_dc(c, spb * 2, 120.0f);
+
+        /* The gate opened at a quarter, so nothing it produces -- body or
+         * tail -- may exceed a quarter. Before the fix the tail climbed
+         * towards step 1's full level instead of decaying from step 0's. */
+        float peakTail = 0.0f;
+        for (int i = spb; i < spb + spb / 2; i++)
+            if (buf[i] > peakTail) peakTail = buf[i];
+        check_near("the release tail stays at the struck step's level",
+                   peakTail, 0.25, 0.02);
+        tg_core_destroy(c);
+        free(buf);
+    }
+
+    /*
+     * A TIE IS ONE GATE, so it holds ONE level -- the struck step's. A level
+     * that stepped mid-gate was a discontinuity in the gain, which is a click.
+     */
+    printf("a tie holds one level:\n");
+    {
+        tg_core_t *c = tg_core_create(44100.0);
+        tg_core_set_param(c, "rate",    "1/16");
+        tg_core_set_param(c, "length",  "1");
+        tg_core_set_param(c, "pattern", "3");      /* both steps on */
+        tg_core_set_param(c, "ties",    "1");      /* step 0 holds through */
+        tg_core_set_param(c, "attack",  "0");
+        tg_core_set_param(c, "decay",   "0");
+        tg_core_set_param(c, "sustain", "1");
+        tg_core_set_param(c, "release", "0");
+        tg_core_set_param(c, "hold",    "1");
+        tg_core_set_param(c, "amount",  "1");
+        tg_core_set_param(c, "cursor", "0");
+        tg_core_set_param(c, "step_amount", "0.50");
+        tg_core_set_param(c, "cursor", "1");
+        tg_core_set_param(c, "step_amount", "1.00");
+
+        const int spb = (int)(44100.0 * 0.125);
+        float *buf = render_dc(c, spb * 2, 120.0f);
+        /* Sample either side of the boundary: one gate, one level. */
+        check_near("before the tie's boundary", buf[spb - 100], 0.50, 0.02);
+        check_near("...and after it, unchanged", buf[spb + 100], 0.50, 0.02);
+        tg_core_destroy(c);
+        free(buf);
+    }
+
+    /*
+     * % MODE: THE SAME SHAPE AT EVERY RATE.
+     *
+     * The whole claim of the feature. In ms an envelope is absolute, so
+     * halving the step halves how much of it fits; in % the stages are a
+     * fraction OF the step, so the picture at 1/16 and at 1/64 is the same
+     * picture with a different clock.
+     */
+    printf("%% mode follows the step:\n");
+    {
+        double lvl[2];
+        for (int pass = 0; pass < 2; pass++) {
+            tg_core_t *c = tg_core_create(44100.0);
+            tg_core_set_param(c, "rate", pass == 0 ? "1/16" : "1/64");
+            tg_core_set_param(c, "length",  "0");    /* one step, repeating */
+            tg_core_set_param(c, "pattern", "1");
+            tg_core_set_param(c, "ties",    "0");
+            tg_core_set_param(c, "time_mode", "1");  /* % of the step */
+            tg_core_set_param(c, "attack",  "0");
+            tg_core_set_param(c, "decay",   "250");  /* 250/500 -> 50% of it */
+            tg_core_set_param(c, "sustain", "0");
+            tg_core_set_param(c, "release", "0");
+            tg_core_set_param(c, "hold",    "1");
+            tg_core_set_param(c, "amount",  "1");
+
+            const double stepS = (pass == 0) ? 0.125 : 0.125 / 4.0;
+            const int spb = (int)(44100.0 * stepS);
+            float *buf = render_dc(c, spb, 120.0f);
+            /* A quarter of the way in, a 50%-of-step decay is half spent. */
+            lvl[pass] = buf[spb / 4];
+            tg_core_destroy(c);
+            free(buf);
+        }
+        printf("      1/16 %.3f   1/64 %.3f\n", lvl[0], lvl[1]);
+        check_near("a quarter into the step reads the same at 1/16 and 1/64",
+                   lvl[1], lvl[0], 0.03);
+    }
+
+    /* A patch written before % mode existed says nothing about it, and ms is
+     * what those patches meant. */
+    printf("an old patch still means milliseconds:\n");
+    {
+        tg_core_t *c = tg_core_create(44100.0);
+        tg_core_set_param(c, "state",
+            "{\"sv\":3,\"slot\":0,\"rate\":\"1/16\",\"attack\":2.00,"
+            "\"decay\":20.00,\"sustain\":1.000,\"release\":20.00,"
+            "\"hold\":1.000,\"amount\":1.000,\"legato\":0}");
+        char buf[16];
+        tg_core_get_param(c, "time_mode", buf, sizeof(buf));
+        check("a blob with no tmode loads as ms", atoi(buf) == 0);
         tg_core_destroy(c);
     }
 
