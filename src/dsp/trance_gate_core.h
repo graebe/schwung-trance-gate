@@ -41,6 +41,25 @@ extern "C" {
  * per step, and all of it has to fit a state blob. */
 #define TG_MAX_STEPS  128
 #define TG_SLOTS      8
+
+/*
+ * THE RATE LADDER AND THE STAGE SCALE, for embedders that have to declare
+ * host parameters before any audio runs.
+ *
+ * These were private to the engine while its only shell was the Move module,
+ * which reads its options out of chain_params. A plugin cannot: a host wants
+ * the option count and the default at construction time, long before it will
+ * accept an answer from get_param.
+ *
+ * THEY ARE ASSERTED AGAINST THE ENGINE, not just written down -- see
+ * tests/test_core.c, which walks every index, checks the labels are distinct,
+ * and checks that one past the end falls back to the default. A number here
+ * that drifts from the Rust table fails there rather than in a host.
+ */
+#define TG_NUM_RATES     13
+#define TG_RATE_DEFAULT  7      /* 1/16 */
+/* A stage runs from 0 to twice the gate's WIDTH, as a percentage of it. */
+#define TG_STAGE_MAX_PCT 200.0f
 #define TG_MASK_WORDS ((TG_MAX_STEPS + 31) / 32)
 
 /*

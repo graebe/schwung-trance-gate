@@ -542,6 +542,59 @@ int main(void) {
         check("both doors land on identical state, clamps included", same);
     }
 
+    /*
+     * THE THREE CONSTANTS THE HEADER PUBLISHES ABOUT THE RATE LADDER.
+     *
+     * A plugin has to declare its host parameters before any audio runs, so
+     * it needs the option count, the default index and the stage scale as
+     * compile-time numbers -- it cannot ask get_param. Publishing them means
+     * two copies of one fact, and this is the assertion that keeps them one:
+     * every value is checked against what the engine DOES rather than against
+     * what the header says.
+     */
+    printf("the header's rate ladder matches the engine:\n");
+    {
+        tg_core_t *c = tg_core_create(44100.0);
+        char seen[TG_NUM_RATES][32];
+        int distinct = 1, all_answered = 1;
+        for (int i = 0; i < TG_NUM_RATES; i++) {
+            char v[16]; snprintf(v, sizeof(v), "%d", i);
+            tg_core_set_param(c, "rate", v);
+            if (tg_core_get_param(c, "rate", seen[i], sizeof(seen[i])) <= 0)
+                all_answered = 0;
+            for (int j = 0; j < i; j++)
+                if (strcmp(seen[i], seen[j]) == 0) distinct = 0;
+        }
+        check("every index 0..TG_NUM_RATES-1 names a rate", all_answered);
+        check("...and they are all different", distinct);
+
+        /* One past the end must NOT name a fourteenth rate. Out of range is
+         * the default, which is how the engine has answered since indices
+         * were first accepted. */
+        char past[32], deflt[32];
+        char v[16]; snprintf(v, sizeof(v), "%d", TG_NUM_RATES);
+        tg_core_set_param(c, "rate", v);
+        tg_core_get_param(c, "rate", past, sizeof(past));
+        snprintf(v, sizeof(v), "%d", TG_RATE_DEFAULT);
+        tg_core_set_param(c, "rate", v);
+        tg_core_get_param(c, "rate", deflt, sizeof(deflt));
+        check("TG_NUM_RATES is the end of the table",
+              strcmp(past, deflt) == 0);
+        check("TG_RATE_DEFAULT is 1/16, as the table's comment says",
+              strcmp(deflt, "1/16") == 0);
+
+        /* TG_STAGE_MAX_PCT is the clamp, so one past it must come back AT
+         * it. */
+        snprintf(v, sizeof(v), "%f", (double)TG_STAGE_MAX_PCT + 50.0);
+        tg_core_set_param(c, "attack", v);
+        char a[32]; tg_core_get_param(c, "attack", a, sizeof(a));
+        printf("      %g%% asked for, %s%% given back\n",
+               (double)TG_STAGE_MAX_PCT + 50.0, a);
+        check("TG_STAGE_MAX_PCT is where a stage clamps",
+              fabs(atof(a) - (double)TG_STAGE_MAX_PCT) < 0.05);
+        tg_core_destroy(c);
+    }
+
     printf("state size:\n");
     {
         tg_core_t *c = tg_core_create(44100.0);
