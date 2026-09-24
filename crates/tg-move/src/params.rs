@@ -8,7 +8,7 @@ read by a minimal parser with an 8 KB budget and this does not comfortably
 fit.
 
 CAPTURED FROM THE C SHELL'S OWN OUTPUT, not transcribed from its source. The
-first attempt lifted the string literals out of trance_gate.c by regex and
+first attempt lifted the string literals out of the C shell's source by regex and
 picked up the ones inside its comments as well -- 79 extra bytes and a stray
 "1" in front of the opening bracket, which the UI would have read as a
 malformed contract. `tests/dump_params.c` prints what the shell actually

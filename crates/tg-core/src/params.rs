@@ -55,50 +55,183 @@ pub fn set_pattern_hex(dst: &mut Mask, val: &str) {
     }
 }
 
+/*
+ * THE AUTOMATABLE PARAMETERS, BY NUMBER.
+ *
+ * [`Instance::set_param`] is the canonical door and takes strings, which is
+ * right for a patch, a pattern or a pad edit -- all of them message-thread
+ * work. It is wrong for HOST AUTOMATION, which arrives on the audio thread: a
+ * float formatted and parsed back costs a locale-dependent conversion in each
+ * direction (C's `atof` honours `LC_NUMERIC`, so a comma-decimal host turns
+ * "0.750" into 0) and a string-match ladder, per value, per block.
+ *
+ * These are the same twelve values on the same wire conventions -- slot,
+ * length and rate are INDICES, legato and time_mode are 0|1, the rest are the
+ * units the string keys use -- with the decimal detour removed. `set_param`
+ * is implemented in terms of [`Instance::set_num`], so every clamp exists
+ * once.
+ *
+ * THE DISCRIMINANTS ARE THE C ABI. `tg_param_t` is this enum's order, and a
+ * host that saved an automation lane saved these numbers, so inserting one in
+ * the middle silently rewires a user's project.
+ */
+#[repr(i32)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Param {
+    Slot = 0,
+    Length,
+    Rate,
+    Legato,
+    TimeMode,
+    Curve,
+    Amount,
+    Hold,
+    Attack,
+    Decay,
+    Sustain,
+    Release,
+}
+
+impl Param {
+    /// The C side passes an `int`. Anything outside the enum is dropped
+    /// rather than clamped onto a neighbour: a wrong parameter silently
+    /// moving a different control is worse than one doing nothing.
+    pub fn from_i32(v: i32) -> Option<Param> {
+        use Param::*;
+        Some(match v {
+            0 => Slot,
+            1 => Length,
+            2 => Rate,
+            3 => Legato,
+            4 => TimeMode,
+            5 => Curve,
+            6 => Amount,
+            7 => Hold,
+            8 => Attack,
+            9 => Decay,
+            10 => Sustain,
+            11 => Release,
+            _ => return None,
+        })
+    }
+}
+
 impl Instance {
-    pub fn set_param(&mut self, key: &str, val: &str) {
-        match key {
-            "slot" => {
-                let s = fmt::atoi(val); /* the wire is the OPTION INDEX */
+    /// The twelve automatable values, by number. Every clamp and every side
+    /// effect lives here; [`Instance::set_param`] parses a string and
+    /// delegates, so the two doors cannot drift apart.
+    ///
+    /// Audio-thread safe: a match, a clamp and a store. No allocation, no
+    /// formatting, no locale.
+    pub fn set_num(&mut self, param: Param, value: f64) {
+        /*
+         * `as i32` SATURATES IN RUST WHERE C'S CAST IS UNDEFINED. For an
+         * out-of-range double C commonly lands on INT_MIN, which every branch
+         * below treats as out of range and rejects -- and saturation lands on
+         * i32::MAX or i32::MIN, which they reject identically. Same outcome,
+         * one of them defined.
+         */
+        match param {
+            Param::Slot => {
+                let s = value as i32; /* the wire is the OPTION INDEX */
                 if s >= 0 && (s as usize) < crate::SLOTS {
                     self.slot = s as usize;
                     /* The cursor is GLOBAL and the length is PER SLOT, so
                      * switching to a shorter pattern can leave it past the
                      * end -- where every edit lands on a step the ring never
-                     * draws. The length branch below clamps for the same
-                     * reason; both doors need the same lock. */
+                     * draws. */
                     let len = self.pat[self.slot].length;
                     if self.cursor >= len {
                         self.cursor = len - 1;
                     }
                 }
             }
-            "length" => {
+            Param::Length => {
                 /* Option INDEX, as for `cursor`: index 15 is the option named
                  * "16", which is a length of 16. */
-                let n = fmt::atoi(val) + 1;
+                let n = value as i64 + 1;
                 let slot = self.slot;
                 self.pat[slot].length = n.clamp(1, MAX_STEPS as i64) as usize;
                 if self.cursor >= self.pat[slot].length {
                     self.cursor = self.pat[slot].length - 1;
                 }
             }
-            "rate" => {
-                self.rate_idx = rates::index_from(val);
+            Param::Rate => {
+                /* OUT OF RANGE IS THE DEFAULT, NOT THE NEAREST END --
+                 * `rates::index_from` has answered that way since indices
+                 * were first accepted, and an old state blob may carry one.
+                 * Clamping here instead would have been a second convention
+                 * for the same wire, differing only in the case nobody looks
+                 * at. A host parameter is a 13-way choice and never sends
+                 * anything else, so this is about the patch door, not the
+                 * knob. */
+                let i = value as i32;
+                self.rate_idx = if i >= 0 && (i as usize) < rates::RATES.len() {
+                    i as usize
+                } else {
+                    rates::RATE_DEFAULT
+                };
                 /* The `ui` readout carries the step DURATION, and it used to
                  * be computed only inside a block -- so a rate changed while
                  * the host was idle reported the old subdivision's length
                  * until audio ran again. The plugin draws its envelope
-                 * against that number, so the picture disagreed with the
-                 * knob. */
+                 * against that number. */
                 self.recalc_ms_per_step();
             }
-            "attack" => self.attack = clampf(fmt::atof(val) as f32, 0.0, STAGE_MAX_PCT),
-            "decay" => self.decay = clampf(fmt::atof(val) as f32, 0.0, STAGE_MAX_PCT),
-            "sustain" => self.sustain = clampf(fmt::atof(val) as f32, 0.0, 1.0),
-            "hold" => self.hold = clampf(fmt::atof(val) as f32, 0.0, 1.0),
-            "release" => self.release = clampf(fmt::atof(val) as f32, 0.0, STAGE_MAX_PCT),
-            "amount" => self.amount = clampf(fmt::atof(val) as f32, 0.0, 1.0),
+            Param::Legato => self.legato = value != 0.0,
+            Param::TimeMode => {
+                self.time_mode = if value != 0.0 { TimeMode::Pct } else { TimeMode::Ms }
+            }
+            Param::Curve => {
+                let c = value as i32;
+                let c = Curve::from_i32(if (0..=2).contains(&c) { c } else { 0 });
+
+                /*
+                 * RE-ANCHOR, OR THE CHANGE IS A CLICK.
+                 *
+                 * `env.t` is a position along the STAGE, and the shape
+                 * decides what level that position means. Halfway through a
+                 * stage is 0.50 linear and 0.82 exponential, so swapping the
+                 * shape under a live gate moves the gain instantly -- exactly
+                 * the fault the attack ramp and the level latch were both
+                 * added to avoid.
+                 *
+                 * Solving shape_new(t') = shape_old(t) keeps the LEVEL and
+                 * changes only the trajectory from here.
+                 */
+                if c != self.curve {
+                    if self.env.t > 0.0 && self.env.t < 1.0 {
+                        let w = crate::envelope::shape(self.curve, self.env.t);
+                        self.env.t = crate::envelope::shape_inv(c, w);
+                    }
+                    self.curve = c;
+                }
+            }
+            Param::Amount => self.amount = clampf(value as f32, 0.0, 1.0),
+            Param::Hold => self.hold = clampf(value as f32, 0.0, 1.0),
+            Param::Sustain => self.sustain = clampf(value as f32, 0.0, 1.0),
+            Param::Attack => self.attack = clampf(value as f32, 0.0, STAGE_MAX_PCT),
+            Param::Decay => self.decay = clampf(value as f32, 0.0, STAGE_MAX_PCT),
+            Param::Release => self.release = clampf(value as f32, 0.0, STAGE_MAX_PCT),
+        }
+    }
+
+    pub fn set_param(&mut self, key: &str, val: &str) {
+        match key {
+            /* The twelve automatable keys parse and delegate -- `set_num`
+             * owns every clamp and every side effect, so the numeric and
+             * string doors cannot drift. */
+            "slot" => self.set_num(Param::Slot, fmt::atoi(val) as f64),
+            "length" => self.set_num(Param::Length, fmt::atoi(val) as f64),
+            /* A LABEL first, a bare number as an index -- `rates::index_from`
+             * owns that convention. */
+            "rate" => self.set_num(Param::Rate, rates::index_from(val) as f64),
+            "attack" => self.set_num(Param::Attack, fmt::atof(val)),
+            "decay" => self.set_num(Param::Decay, fmt::atof(val)),
+            "sustain" => self.set_num(Param::Sustain, fmt::atof(val)),
+            "hold" => self.set_num(Param::Hold, fmt::atof(val)),
+            "release" => self.set_num(Param::Release, fmt::atof(val)),
+            "amount" => self.set_num(Param::Amount, fmt::atof(val)),
             "cursor" => {
                 /*
                  * THE WIRE CARRIES THE OPTION INDEX, and the option NAMES
@@ -145,48 +278,27 @@ impl Instance {
                 }
             }
             "legato" => {
-                self.legato = val == "On" || val == "on" || fmt::atoi(val) != 0;
+                let on = val == "On" || val == "on" || fmt::atoi(val) != 0;
+                self.set_num(Param::Legato, on as i32 as f64);
             }
             "curve" => {
+                /* Names as well as the index; the re-anchor that keeps a
+                 * mid-gate change from clicking lives in `set_num` with the
+                 * rest. */
                 let c = match val {
                     "Exponential" | "Exp" => 1,
                     "S-Curve" | "S" => 2,
                     _ => fmt::atoi(val) as i32,
                 };
-                let c = Curve::from_i32(if (0..=2).contains(&c) { c } else { 0 });
-
-                /*
-                 * RE-ANCHOR, OR THE CHANGE IS A CLICK.
-                 *
-                 * `env.t` is a position along the STAGE, and the shape
-                 * decides what level that position means. Halfway through a
-                 * stage is 0.50 linear and 0.82 exponential, so swapping the
-                 * shape under a live gate moves the gain instantly -- exactly
-                 * the fault the attack ramp and the level latch were both
-                 * added to avoid.
-                 *
-                 * Solving shape_new(t') = shape_old(t) keeps the LEVEL and
-                 * changes only the trajectory from here.
-                 */
-                if c != self.curve {
-                    if self.env.t > 0.0 && self.env.t < 1.0 {
-                        let w = crate::envelope::shape(self.curve, self.env.t);
-                        self.env.t = crate::envelope::shape_inv(c, w);
-                    }
-                    self.curve = c;
-                }
+                self.set_num(Param::Curve, c as f64);
             }
             "time_mode" => {
                 /* Names as well as the index: the Move shell wires this enum
                  * by index while a patch or a plugin may well say what it
                  * means. */
-                self.time_mode = if val == "%" || val == "Step" || val == "step"
-                    || fmt::atoi(val) != 0
-                {
-                    TimeMode::Pct
-                } else {
-                    TimeMode::Ms
-                };
+                let pct =
+                    val == "%" || val == "Step" || val == "step" || fmt::atoi(val) != 0;
+                self.set_num(Param::TimeMode, pct as i32 as f64);
             }
             "pattern" => {
                 let slot = self.slot;
@@ -253,6 +365,64 @@ impl Instance {
                     pos += length;
                 }
                 fmt::f(&mut b, pos, 3)
+            }
+            /*
+             * ONE READ FOR THE TWELVE AUTOMATABLE VALUES.
+             *
+             * `ui` carries the pattern and the playhead; it carries no part
+             * of the SOUND, which is why a shell that wants to know whether
+             * its picture is stale has to ask for nine keys one at a time --
+             * nine locks and nine buffers, thirty times a second, to answer
+             * "did anything move".
+             *
+             * This is that set in one line: exactly the values with a host
+             * parameter behind them, in the order the plugin declares them,
+             * plus `width_ms` because a shell showing a stage in milliseconds
+             * needs it to convert and would otherwise take a tenth lock to
+             * get it.
+             *
+             *   slot:legato:time_mode:curve:rate:length:amount:hold:attack:
+             *   decay:sustain:release:width_ms
+             *
+             * FLOATS ARE %.9g, WHICH IS NOT COSMETIC. Nine significant digits
+             * is FLT_DECIMAL_DIG -- the shortest precision for which
+             * float -> decimal -> float is the identity. The single-key
+             * getters round to %.1f and %.2f, so a shell that reads a value
+             * and writes it back quantises the patch every time it does so.
+             * Anything that round-trips through this readout must come back
+             * bit-identical, or the caller needs a suppression flag and every
+             * suppression flag eventually drops something real.
+             *
+             * `length` is the OPTION INDEX and `rate` is the LABEL, both
+             * exactly as the single-key getters answer them -- one convention
+             * per key, not two. attack/decay/release are PERCENTAGES OF
+             * WIDTH, like everywhere else.
+             */
+            "params" => {
+                let r = write!(
+                    b,
+                    "{}:{}:{}:{}:{}:{}:",
+                    self.slot,
+                    self.legato as i32,
+                    self.time_mode as i32,
+                    self.curve as i32,
+                    rates::RATES[self.rate_idx].label,
+                    p.length - 1
+                );
+                r.and_then(|_| {
+                    for v in [
+                        self.amount,
+                        self.hold,
+                        self.attack,
+                        self.decay,
+                        self.sustain,
+                        self.release,
+                    ] {
+                        fmt::g(&mut b, v as f64, 9)?;
+                        b.write_char(':')?;
+                    }
+                    fmt::g(&mut b, self.width_ms(), 9)
+                })
             }
             "ui" => return self.ui_readout(b),
             "state" => return crate::state::save(self, b),

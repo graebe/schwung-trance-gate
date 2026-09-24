@@ -17,6 +17,7 @@ that; anything else is the caller's bargain, as it was before.
 */
 
 use std::ffi::{c_char, c_int, CStr};
+use tg_core::params::Param;
 use tg_core::{Instance, Transport};
 
 /// Opaque to C, exactly as `tg_core_t` was.
@@ -80,6 +81,20 @@ pub unsafe extern "C" fn tg_core_set_param(
         return;
     }
     c.0.set_param(s(key), s(val));
+}
+
+/// `tg_core_set_num`: the twelve automatable values by number, for host
+/// automation arriving on the audio thread. See [`tg_core::params::Param`] --
+/// the discriminants are the ABI, so a host that saved an automation lane
+/// saved these integers.
+///
+/// A parameter outside the enum is DROPPED, not clamped onto a neighbour: one
+/// silently moving a different control is worse than one doing nothing.
+#[no_mangle]
+pub unsafe extern "C" fn tg_core_set_num(c: *mut TgCore, param: c_int, value: f64) {
+    let Some(c) = c.as_mut() else { return };
+    let Some(p) = Param::from_i32(param) else { return };
+    c.0.set_num(p, value);
 }
 
 /// Returns the length written, or -1 for a key this engine does not serve --

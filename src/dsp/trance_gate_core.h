@@ -93,6 +93,35 @@ void tg_core_process_f32(tg_core_t *c, float   *lr, int frames, const tg_transpo
 void tg_core_process_f32_split(tg_core_t *c, float *l, float *r, int frames,
                                const tg_transport_t *t);
 
+/*
+ * THE AUTOMATABLE PARAMETERS, BY NUMBER.
+ *
+ * tg_core_set_param is the canonical door and takes strings, which is right
+ * for a patch, a pattern or a pad edit -- all of them message-thread work. It
+ * is wrong for HOST AUTOMATION, which arrives on the audio thread: a float
+ * formatted with snprintf and parsed back with atof costs a locale-dependent
+ * conversion in each direction (atof honours LC_NUMERIC, so a comma-decimal
+ * host turns "0.750" into 0) and a strcmp ladder, per value, per block.
+ *
+ * These are the same twelve values on the same wire conventions -- slot,
+ * length and rate are INDICES, legato and time_mode are 0|1, the rest are the
+ * units the string keys use -- with the decimal detour removed. The string
+ * setter is implemented in terms of this one, so every clamp exists once.
+ *
+ * THE VALUES ARE THE ABI. A host that saved an automation lane saved these
+ * numbers, so inserting one in the middle silently rewires a user's project.
+ */
+typedef enum {
+    TG_P_SLOT = 0, TG_P_LENGTH, TG_P_RATE, TG_P_LEGATO, TG_P_TIME_MODE,
+    TG_P_CURVE, TG_P_AMOUNT, TG_P_HOLD, TG_P_ATTACK, TG_P_DECAY,
+    TG_P_SUSTAIN, TG_P_RELEASE, TG_P_COUNT
+} tg_param_t;
+
+/* Audio-thread safe: a switch, a clamp and a store. No allocation, no
+ * formatting, no locale. A param outside the enum is dropped rather than
+ * clamped onto a neighbour. */
+void tg_core_set_num(tg_core_t *instance, tg_param_t param, double value);
+
 void tg_core_set_param(tg_core_t *c, const char *key, const char *val);
 /* Returns the length written, or -1 for a key this engine does not serve --
  * which is how a shell knows to answer its own (chain_params, ui_hierarchy). */
@@ -107,9 +136,13 @@ int  tg_core_get_param(tg_core_t *c, const char *key, char *buf, int buf_len);
  * would not fail -- get_param snprintfs, so it TRUNCATES, and a truncated
  * patch is a project that silently reloads with the wrong pattern.
  *
- * The private encoding's true worst case is asserted against this number in
- * trance_gate_core.c, so growing the format past it is a build failure here
- * rather than a corrupt save downstream.
+ * The private encoding's true worst case is asserted against this number by
+ * tests/test_core.c, which builds the largest patch the format can express
+ * (eight slots of fully accented 128-step patterns) and measures what the
+ * emitter actually writes. That was a _Static_assert over the format macros
+ * while the engine was C; measuring the emitter is the stronger of the two,
+ * and it is what stands between growing the format and a corrupt save
+ * downstream.
  */
 #define TG_STATE_MAX 4096
 

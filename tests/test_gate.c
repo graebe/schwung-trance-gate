@@ -458,7 +458,7 @@ int main(void) {
      * -- the option names supply the step numbers, so index 1 displays as "2".
      * It was the 1-based name for a while and displayed one too high, because
      * the host's three enum resolvers disagree about names vs indices; see the
-     * note in trance_gate.c.
+     * note on `cursor` in crates/tg-core/src/params.rs.
      */
     set(api, inst, "cursor", "1");                 /* index 1 */
     set(api, inst, "step_amount", "0.5");

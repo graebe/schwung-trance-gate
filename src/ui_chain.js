@@ -370,7 +370,8 @@ function parseUi(raw) {
         phase: isFinite(phase) ? phase : 0,
         msStep: isFinite(msStep) && msStep > 0 ? msStep : 0,
         /* "the playhead is advancing". See the `advancing` field in
-         * trance_gate.c for why it is not simply called `running`. */
+         * crates/tg-core/src/params.rs for why it is not simply called
+         * `running`. */
         moving,
         /* 0-based here; the `cursor` PARAM is 1-based because it is shown as a
          * step number. The two spellings meet only in the DSP. */
@@ -862,7 +863,7 @@ function onPadPress(note) {
 
     /* 1-based on the wire: the cursor is numbered the way the ring is. */
     /* The wire carries the option INDEX, which is 0-based and matches the
-     *  readout. See the note in trance_gate.c's set_param. */
+     *  readout. See the note in crates/tg-core/src/params.rs's set_param. */
     host_module_set_param("cursor", String(i));
 
     /*
@@ -1103,7 +1104,8 @@ function tick() {
      * changed -- page_controller.mjs does the work first and the early-out
      * afterwards. Calling it every frame was this module's single largest
      * cost, spent ~44 times a second on a contract that is a string literal in
-     * trance_gate.c and cannot change while the module is loaded.
+     * crates/tg-move/src/params.rs and cannot change while the module is
+     * loaded.
      *
      * On an interval a genuine change is still picked up, within about two
      * thirds of a second of anyone being able to notice.

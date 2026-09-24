@@ -307,10 +307,241 @@ int main(void) {
     }
 
     /*
+     * LEGATO AND WIDTH TOGETHER, WHICH NOTHING ELSE TESTS.
+     *
+     * "Join Neighbors" means every adjacent ON pair is tied, and a tie
+     * overrides the gate length -- so legato has to override it too, or the
+     * two controls contradict each other. When it did not, the result was not
+     * a cosmetic difference: the gate released inside step 0, reached
+     * TG_IDLE, and legato then suppressed the attack that would have
+     * restarted it. TG_IDLE is absorbing, so the pattern went SILENT and
+     * stayed silent for every step after the first.
+     *
+     * THIS BLOCK IS THE REASON THE FIX CAN BE RELIED ON. The legato test
+     * above pins hold = 1, where the gate rule never runs; the gate-length
+     * tests in test_gate.c use adjacent ON steps but leave legato off. The
+     * bug lived in the one square neither covered, and it has already been
+     * reintroduced once by a rewrite of the surrounding function.
+     */
+    printf("legato and width together:\n");
+    {
+        double mean[2], lastStep[2];
+        for (int leg = 0; leg < 2; leg++) {
+            tg_core_t *c = tg_core_create(48000.0);
+            tg_core_set_param(c, "rate", "1/16");
+            tg_core_set_param(c, "length", "7");       /* 8 steps */
+            tg_core_set_param(c, "pattern", "ff");     /* all ON */
+            tg_core_set_param(c, "ties", "0");
+            /* Stages are PERCENTAGES OF WIDTH now; sustain 1 keeps the decay
+             * out of the measurement either way. */
+            tg_core_set_param(c, "attack", "2");
+            tg_core_set_param(c, "decay", "10");
+            tg_core_set_param(c, "sustain", "1");
+            tg_core_set_param(c, "release", "10");
+            tg_core_set_param(c, "hold", "0.5");
+            tg_core_set_param(c, "amount", "1");
+            tg_core_set_param(c, "legato", leg ? "1" : "0");
+
+            /* 1/16 at 120 BPM = 125 ms = 6000 frames at 48k. */
+            const int per = 6000, BL = 64;
+            double acc = 0, accLast = 0; int cnt = 0, cntLast = 0;
+            float b[64 * 2];
+            for (int i = 0; i < per * 8; i += BL) {
+                for (int k = 0; k < BL * 2; k++) b[k] = 1.0f;
+                tg_transport_t t = { 1, (double)i / (double)per * 0.25, 120.0f };
+                tg_core_process_f32(c, b, BL, &t);
+                for (int k = 0; k < BL; k++) {
+                    acc += b[k*2]; cnt++;
+                    if (i + k >= per * 7) { accLast += b[k*2]; cntLast++; }
+                }
+            }
+            mean[leg]     = acc / cnt;
+            lastStep[leg] = accLast / cntLast;
+            tg_core_destroy(c);
+        }
+        printf("      8 ON steps at width 50%%: legato off %.3f, on %.3f\n",
+               mean[0], mean[1]);
+        check("legato holds the gate open across the run", mean[1] > 0.95);
+        check("...and legato OFF still closes it every step", mean[0] < 0.75);
+        /* The regression that matters. Before the fix this read 0.000: the
+         * gate shut after step 0 and never reopened, for this pattern or any
+         * pattern after it. */
+        check("...and the last step has not been silenced", lastStep[1] > 0.95);
+    }
+    {
+        /* A next step that is OFF still closes the gate, which is what keeps
+         * legato from collapsing into "tie everything". */
+        tg_core_t *c = tg_core_create(48000.0);
+        tg_core_set_param(c, "rate", "1/16");
+        tg_core_set_param(c, "length", "1");       /* 2 steps */
+        tg_core_set_param(c, "pattern", "1");      /* step 0 ON, step 1 OFF */
+        tg_core_set_param(c, "ties", "0");
+        tg_core_set_param(c, "attack", "0");  tg_core_set_param(c, "decay", "0");
+        tg_core_set_param(c, "sustain", "1"); tg_core_set_param(c, "release", "0");
+        tg_core_set_param(c, "hold", "0.5");
+        tg_core_set_param(c, "amount", "1");
+        tg_core_set_param(c, "legato", "1");
+
+        const int per = 6000, BL = 64;
+        double acc = 0; int cnt = 0;
+        float b[64 * 2];
+        for (int i = 0; i < per; i += BL) {
+            for (int k = 0; k < BL * 2; k++) b[k] = 1.0f;
+            tg_transport_t t = { 1, (double)i / (double)per * 0.25, 120.0f };
+            tg_core_process_f32(c, b, BL, &t);
+            for (int k = 0; k < BL; k++)
+                if (i + k > per * 6 / 10) { acc += b[k*2]; cnt++; }
+        }
+        check("legato does not hold through into an OFF step", (acc / cnt) < 0.05);
+        tg_core_destroy(c);
+    }
+
+    /*
      * STATE SIZE. The slot budget is 8192 and a bus insert's is 1024, and an
      * oversized blob is DROPPED rather than truncated -- so the number worth
      * knowing is where the bus case stops working, not whether it does.
      */
+    /*
+     * THE `params` READOUT. Twelve automatable values plus width_ms in one
+     * read, so a shell does not take nine locks to ask "did anything move".
+     * Two properties matter and neither is obvious from looking at it: every
+     * field must agree with the single-key getter for the same key, and the
+     * floats must survive a round trip EXACTLY -- a reader that writes back
+     * what it read must not move the patch.
+     */
+    printf("the params readout:\n");
+    {
+        tg_core_t *c = tg_core_create(48000.0);
+        tg_core_set_param(c, "slot", "3");
+        tg_core_set_param(c, "legato", "1");
+        tg_core_set_param(c, "time_mode", "1");
+        tg_core_set_param(c, "curve", "2");
+        tg_core_set_param(c, "rate", "1/8");
+        tg_core_set_param(c, "length", "31");      /* index -> 32 steps */
+        /* Awkward on purpose: values a %.1f or %.2f getter would round. */
+        tg_core_set_param(c, "amount",  "0.123456789");
+        tg_core_set_param(c, "hold",    "0.987654321");
+        tg_core_set_param(c, "attack",  "123.456789");
+        tg_core_set_param(c, "decay",   "0.0123456789");
+        tg_core_set_param(c, "sustain", "0.333333343");
+        tg_core_set_param(c, "release", "199.999985");
+
+        char line[TG_STATE_MAX];
+        int n = tg_core_get_param(c, "params", line, sizeof(line));
+        check("params answers at all", n > 0);
+
+        /* Split on ':' -- 13 fields. */
+        char *f[16]; int nf = 0;
+        for (char *t = line; nf < 16; ) {
+            f[nf++] = t;
+            char *colon = strchr(t, ':');
+            if (!colon) break;
+            *colon = '\0'; t = colon + 1;
+        }
+        check("params has thirteen fields", nf == 13);
+
+        char one[TG_STATE_MAX];
+        #define MIRRORS(idx, key) \
+            (tg_core_get_param(c, key, one, sizeof(one)) >= 0 && strcmp(f[idx], one) == 0)
+        check("...slot mirrors get_param",      MIRRORS(0, "slot"));
+        check("...legato mirrors get_param",    MIRRORS(1, "legato"));
+        check("...time_mode mirrors get_param", MIRRORS(2, "time_mode"));
+        check("...curve mirrors get_param",     MIRRORS(3, "curve"));
+        check("...rate is the LABEL, as get_param answers it", MIRRORS(4, "rate"));
+        check("...length is the OPTION INDEX, as get_param answers it",
+              MIRRORS(5, "length"));
+        #undef MIRRORS
+
+        /*
+         * The round trip. Feeding each float back through set_param must land
+         * on the same bits -- that is the whole reason for %.9g, and it is
+         * what lets a caller read-modify-write without a suppression flag.
+         */
+        static const char *fkeys[] = { "amount", "hold", "attack",
+                                       "decay", "sustain", "release" };
+        int exact = 1;
+        for (int i = 0; i < 6; i++) {
+            tg_core_set_param(c, fkeys[i], f[6 + i]);
+            char back[TG_STATE_MAX];
+            tg_core_get_param(c, "params", back, sizeof(back));
+            /* re-split and compare just this field */
+            char *g[16]; int ng = 0;
+            for (char *t = back; ng < 16; ) {
+                g[ng++] = t;
+                char *colon = strchr(t, ':');
+                if (!colon) break;
+                *colon = '\0'; t = colon + 1;
+            }
+            if (ng != 13 || strcmp(g[6 + i], f[6 + i]) != 0) {
+                printf("      %s: wrote %s, read %s\n", fkeys[i], f[6 + i],
+                       (ng == 13) ? g[6 + i] : "(short line)");
+                exact = 0;
+            }
+        }
+        check("every float round-trips bit-exactly", exact);
+
+        tg_core_destroy(c);
+    }
+    {
+        /* width_ms is the last field, and it is hold * ms_per_step -- the
+         * number a shell needs to print a stage in milliseconds. */
+        tg_core_t *c = tg_core_create(48000.0);
+        tg_core_set_param(c, "rate", "1/16");
+        tg_core_set_param(c, "hold", "0.5");
+        char line[TG_STATE_MAX], w[TG_STATE_MAX];
+        tg_core_get_param(c, "params", line, sizeof(line));
+        tg_core_get_param(c, "width_ms", w, sizeof(w));
+        const char *last = strrchr(line, ':');
+        check("params carries width_ms last",
+              last != NULL && fabs(atof(last + 1) - atof(w)) < 0.01);
+        tg_core_destroy(c);
+    }
+
+    /*
+     * THE TWO DOORS AGREE. tg_core_set_param parses a string and delegates to
+     * tg_core_set_num, so every clamp exists once -- this is the assertion
+     * that keeps it that way. Two instances driven the same way, one through
+     * each door, must end up with byte-identical state, INCLUDING at the ends
+     * where the clamps bite.
+     */
+    printf("numeric and string setters agree:\n");
+    {
+        struct { tg_param_t p; const char *key; double v; } sweep[] = {
+            { TG_P_SLOT,      "slot",      3    }, { TG_P_SLOT,      "slot",      99   },
+            { TG_P_LENGTH,    "length",    31   }, { TG_P_LENGTH,    "length",    999  },
+            { TG_P_RATE,      "rate",      5    }, { TG_P_RATE,      "rate",      -4   },
+            { TG_P_LEGATO,    "legato",    1    }, { TG_P_TIME_MODE, "time_mode", 1    },
+            { TG_P_CURVE,     "curve",     2    }, { TG_P_CURVE,     "curve",     77   },
+            { TG_P_AMOUNT,    "amount",    0.37 }, { TG_P_AMOUNT,    "amount",    9.0  },
+            { TG_P_HOLD,      "hold",      0.62 }, { TG_P_HOLD,      "hold",      -1.0 },
+            { TG_P_ATTACK,    "attack",    42.5 }, { TG_P_ATTACK,    "attack",    999  },
+            { TG_P_DECAY,     "decay",     7.25 }, { TG_P_DECAY,     "decay",     -5   },
+            { TG_P_SUSTAIN,   "sustain",   0.45 }, { TG_P_RELEASE,   "release",   88.0 },
+        };
+        int same = 1;
+        for (unsigned i = 0; i < sizeof(sweep)/sizeof(sweep[0]); i++) {
+            tg_core_t *a = tg_core_create(48000.0);
+            tg_core_t *b = tg_core_create(48000.0);
+            char num[64];
+            /* %.17g so the STRING door is not the one losing precision --
+             * this test is about the clamps, not about formatting. */
+            snprintf(num, sizeof(num), "%.17g", sweep[i].v);
+
+            tg_core_set_num(a, sweep[i].p, sweep[i].v);
+            tg_core_set_param(b, sweep[i].key, num);
+
+            char sa[TG_STATE_MAX], sb[TG_STATE_MAX];
+            tg_core_get_param(a, "state", sa, sizeof(sa));
+            tg_core_get_param(b, "state", sb, sizeof(sb));
+            if (strcmp(sa, sb) != 0) {
+                printf("      %s = %g diverged\n", sweep[i].key, sweep[i].v);
+                same = 0;
+            }
+            tg_core_destroy(a); tg_core_destroy(b);
+        }
+        check("both doors land on identical state, clamps included", same);
+    }
+
     printf("state size:\n");
     {
         tg_core_t *c = tg_core_create(44100.0);
@@ -337,6 +568,19 @@ int main(void) {
         printf("      the same, every step accented   : %5d bytes\n", accented);
         check("worst case fits an audio FX slot (8192)", accented > 0 && accented <= 8192);
         check("no-accent case fits a bus insert (1024)", plain > 0 && plain <= 1024);
+        /*
+         * AND IT FITS THE NUMBER EMBEDDERS SIZE THEIR BUFFERS FROM.
+         *
+         * This was a _Static_assert in the C engine, computed from the format
+         * macros; the Rust engine has no macros to compute it from, so it is
+         * measured here instead -- against the real emitter rather than a
+         * conservative bound over it, which is the stronger check of the two.
+         * It is not decoration: a shell that sized this buffer at 2048 got a
+         * SILENTLY TRUNCATED patch, because get_param has snprintf semantics
+         * and a truncated blob reloads as the wrong pattern with nothing said.
+         */
+        check("worst case fits TG_STATE_MAX, which embedders size from",
+              accented > 0 && accented < TG_STATE_MAX);
         if (accented > 1024)
             printf("      note: a fully accented 8x128 patch exceeds a BUS INSERT's\n"
                    "            1024 bytes. Slots are unaffected.\n");

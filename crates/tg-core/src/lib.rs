@@ -320,14 +320,36 @@ impl Instance {
             self.last_step = Some(r.step);
         }
 
-        /* Gate length: release inside the step, not only at its edge. A tie
-         * means "hold through", so shortening it would contradict the tie. */
+        /*
+         * Gate length: release inside the step, not only at its edge. A tie
+         * means "hold through", so shortening it would contradict the tie --
+         * and JOIN NEIGHBORS is "every adjacent ON pair is tied", so it has
+         * to hold through for exactly the same reason.
+         *
+         * Leaving legato out of this rule made it wrong in both directions at
+         * once. Below Width 100% the envelope released inside every step,
+         * reached Idle, and then found no attack waiting at the boundary
+         * because `on_step_boundary` had suppressed it. Idle is ABSORBING --
+         * this block's own guard excludes it -- so the gate shut after step 0
+         * and the pattern was SILENT from there on. At Width 100% this block
+         * never runs at all, and at Sustain 100% a retrigger ramps from 1.0
+         * to 1.0, so there the switch did nothing audible. Between them that
+         * covered nearly every setting anyone would reach for, which is why
+         * it read as broken.
+         *
+         * The SUCCESSOR is consulted, not the current step's tie bit, because
+         * that is what "adjacent ON pair" means. A next step that is OFF
+         * still closes the gate, which is what keeps this distinct from a
+         * tie.
+         */
         if self.hold < 1.0
             && self.env.stage != Stage::Release
             && self.env.stage != Stage::Idle
         {
             let p = &self.pat[self.slot];
-            if r.frac >= self.hold as f64 && !(p.on(r.step) && p.tied(r.step)) {
+            let next = if r.length > 0 { (r.step + 1) % r.length } else { r.step };
+            let held = p.on(r.step) && (p.tied(r.step) || (self.legato && p.on(next)));
+            if r.frac >= self.hold as f64 && !held {
                 let l = self.lens();
                 self.env.enter(Stage::Release, &l);
             }
