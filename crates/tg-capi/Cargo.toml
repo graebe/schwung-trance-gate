@@ -1,0 +1,15 @@
+[package]
+name = "tg-capi"
+version = "0.3.0"
+edition = "2021"
+license = "MIT"
+description = "The tg_core_* C ABI over the Trance Gate engine"
+
+[lib]
+name = "tg_capi"
+# staticlib for the JUCE plugin to link; cdylib so the engine's own C tests
+# can dlopen-free link it the same way they linked the .c files.
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+tg-core = { path = "../tg-core" }

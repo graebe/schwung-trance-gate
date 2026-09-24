@@ -1,0 +1,13 @@
+[package]
+name = "tg-move"
+version = "0.3.0"
+edition = "2021"
+license = "MIT"
+description = "The Schwung audio_fx v2 shell for the Trance Gate"
+
+[lib]
+name = "tg_move"
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+tg-core = { path = "../tg-core" }

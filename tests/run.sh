@@ -1,16 +1,31 @@
 #!/usr/bin/env bash
 # Headless tests for the gate engine. Runs natively -- no Move required.
+#
+# THE ENGINE IS RUST AND THE TESTS ARE STILL C. That is deliberate and is the
+# whole verification strategy of the port: these suites link the engine
+# through its C ABI and do not care what is behind it, so they were relinked
+# rather than rewritten -- 1,510 lines of existing assertions, unchanged,
+# saying whether the port is correct.
 set -e
 cd "$(dirname "$0")/.."
+
+# rustup's shims may not be on PATH; the toolchain's own bin always is once
+# found, and cargo needs rustc beside it.
+if ! command -v cargo >/dev/null 2>&1; then
+    TC="$(rustup which cargo 2>/dev/null)" || true
+    [ -n "$TC" ] && PATH="$(dirname "$TC"):$PATH" && export PATH
+fi
+cargo build --release -p tg-capi
+ENGINE=target/release/libtg_capi.a
 cc -std=c11 -Wall -Wextra -Wno-unused-parameter -Isrc/dsp \
-   tests/test_gate.c src/dsp/trance_gate.c src/dsp/trance_gate_core.c -o build/test_gate -lm
+   tests/test_gate.c src/dsp/trance_gate.c "$ENGINE" -o build/test_gate -lm
 ./build/test_gate || exit 1
 
 # The portable engine's own tests: sample rate, the float paths and the
 # transport struct -- three freedoms the Schwung shell cannot exercise,
 # because it is always 44100, always int16 and always has a host.
 cc -std=c11 -Wall -Wextra -Isrc/dsp \
-   tests/test_core.c src/dsp/trance_gate_core.c -o build/test_core -lm
+   tests/test_core.c "$ENGINE" -o build/test_core -lm
 ./build/test_core || exit 1
 
 # THE GOLDEN RENDER. 20 seconds of audio through the whole engine, compared
@@ -39,9 +54,23 @@ cc -std=c11 -Wall -Wextra -Isrc/dsp \
 # places of a percentage. A units change cannot keep a hash; it can and must
 # keep the sound.
 # Previous: 8e4892aa8e3947594e91cf966f7ddc98
-GOLDEN=4264807b9e7da87844309fa48d0cc8a3
+# Re-recorded 2026-09-24 for the Rust port -- and the OLD HASH WAS PINNING A
+# COMPILER, not the algorithm.
+#
+# The C engine compiled with clang's default fp-contract fuses `a - b*c` into
+# a single FMA, one rounding instead of two. Rust does not contract, so the
+# two differed by one f32 ulp wherever Amount or a per-step level was not 1 --
+# 140 of 352,800 samples, never by more than 1 LSB of 32768.
+#
+# Built with -ffp-contract=off the C produces THIS hash exactly, which is what
+# identified the cause and what makes the new number the algorithm's rather
+# than a build flag's. Worth knowing: the shipped Move .so is built -Ofast,
+# which contracts harder still, so the module and its tests never agreed
+# bit-for-bit until now.
+# Previous: 4264807b9e7da87844309fa48d0cc8a3 (C, with contraction)
+GOLDEN=3992810c52d7962b4d25b3a30494ee2e
 cc -std=c11 -Wall -Wextra -Wno-unused-parameter -Isrc/dsp \
-   tests/render_ref.c src/dsp/trance_gate.c src/dsp/trance_gate_core.c \
+   tests/render_ref.c src/dsp/trance_gate.c "$ENGINE" \
    -o build/render_ref -lm
 GOT=$(./build/render_ref | md5 -q 2>/dev/null || ./build/render_ref | md5sum | cut -d" " -f1)
 echo
@@ -63,7 +92,7 @@ if [ -d "$SHARED/param_pages" ]; then
   # against the PREVIOUS build's JSON, silently, for as long as the old
   # binary kept working. A stale fixture reports the old contract as the
   # current one, which is worse than no fixture at all.
-  cc -std=c11 -Isrc/dsp tests/dump_params.c src/dsp/trance_gate.c src/dsp/trance_gate_core.c \
+  cc -std=c11 -Isrc/dsp tests/dump_params.c src/dsp/trance_gate.c "$ENGINE" \
      -o build/dump_params -lm
   ./build/dump_params > build/chain_params.json
   TG_PARAMS=build/chain_params.json node tests/smoke_ui.mjs "$SHARED" build/.smoke

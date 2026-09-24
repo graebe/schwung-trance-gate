@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = ["crates/tg-core", "crates/tg-capi", "crates/tg-move"]
+
+# THE AUDIO CALLBACK MUST NOT UNWIND.
+#
+# Every entry point runs on the SPI audio callback -- SCHED_FIFO 70, ~2370us
+# of slack -- and unwinding a panic out of `extern "C"` into the C host is
+# undefined behaviour. Aborting is the honest failure: it is a crash either
+# way, and this way it is one the OS reports rather than one that corrupts the
+# host's stack on its way out.
+#
+# It also removes the landing pads, which is most of the size a panicking Rust
+# cdylib carries over a C one.
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1
+opt-level = 3
+strip = true
+
+[profile.dev]
+panic = "abort"
