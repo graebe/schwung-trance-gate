@@ -55,21 +55,16 @@ A beta is only offered when it is strictly newer than stable.
 
 ## Licence
 
-**GPL-3.0-or-later**, for every crate here and for `src/ui_chain.js`. See
-`LICENSE`, which also ships inside the module tarball -- what lands on a device
-is a `.so` and a `.js` with no repository near them, so the terms have to
-travel with them.
+**MIT**, © 2026 Torben Gräber. See `LICENSE`, which also ships inside the
+module tarball -- what lands on a device is a `.so` and a `.js` with no
+repository near them, and MIT asks that the notice travel with the copy.
 
-It was MIT until the Ableton Live plugin moved to
-[nih-plug](https://github.com/robbert-vdh/nih-plug), whose **VST3 bindings are
-GPLv3**. Anything linked into that binary has to be compatible with it, and
-`tg-core` is linked into it.
+Every crate here has **no external dependencies at all** -- `Cargo.lock` holds
+`tg-core`, `tg-capi` and `tg-move` and nothing else -- so there is no
+third-party licence to be compatible with and nothing to attribute.
 
-Strictly, MIT would also have been compatible -- permissive code may be taken
-into a GPL work. One licence across the whole project was chosen over two
-because the alternative is a rule about which crate may be used where, and
-that is the kind of rule that is remembered wrongly.
-
-The Move module does not link nih-plug and would not have needed this. It
-carries the same licence anyway, so that the engine on the device and the
-engine in the plugin are the same thing in this respect as in every other.
+It was briefly GPL-3.0-or-later, on the belief that the Ableton Live plugin
+had to be. It does not: Steinberg relicensed the **VST3 SDK to MIT**, and
+their GPLv3 and proprietary options are withdrawn. What forced the GPL was
+nih-plug's third-party VST3 bindings, which are GPLv3 and now needlessly so.
+A plugin built on iPlug2 against the official SDK is MIT throughout.

@@ -5,7 +5,7 @@
   "version": "1.0.0",
   "description": "Tempo-locked step gate with ADSR, ties and pad editing",
   "author": "graebe",
-  "license": "GPL-3.0-or-later",
+  "license": "MIT",
   "dsp": "trance-gate.so",
   "api_version": 2,
   "ui_chain": "ui_chain.js",

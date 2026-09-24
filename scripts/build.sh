@@ -54,10 +54,10 @@ cat src/module.json                        > "dist/$MODULE_ID/module.json"
 cat "build/${MODULE_ID}.so"                > "dist/$MODULE_ID/${MODULE_ID}.so"
 [ -f src/ui_chain.js ] && cat src/ui_chain.js > "dist/$MODULE_ID/ui_chain.js"
 [ -f src/help.json ]   && cat src/help.json   > "dist/$MODULE_ID/help.json"
-# THE LICENCE SHIPS WITH THE BINARY. The module is GPL-3.0-or-later, and what
-# lands on a device is a .so and a .js with no repository anywhere near them --
-# so the terms have to travel in the tarball or they do not reach the person
-# the licence is addressed to.
+# THE LICENCE SHIPS WITH THE BINARY. What lands on a device is a .so and a .js
+# with no repository anywhere near them, and MIT asks that the notice
+# accompany the copy -- so it travels in the tarball or it does not reach the
+# person it is addressed to at all.
 cat LICENSE                                > "dist/$MODULE_ID/LICENSE"
 chmod +x "dist/$MODULE_ID/${MODULE_ID}.so"
 
