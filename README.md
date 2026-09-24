@@ -47,8 +47,8 @@ containing `-beta.` updates `channels.beta`, anything else updates
 the build if they disagree, before it builds anything.
 
 ```bash
-git tag v0.2.0        && git push origin v0.2.0          # stable, from main
-git tag v0.3.0-beta.1 && git push origin v0.3.0-beta.1   # beta, from the beta branch
+git tag v1.0.0        && git push origin v1.0.0          # stable, from main
+git tag v1.1.0-beta.1 && git push origin v1.1.0-beta.1   # beta, from the beta branch
 ```
 
 A beta is only offered when it is strictly newer than stable.

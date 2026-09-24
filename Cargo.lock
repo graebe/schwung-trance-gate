@@ -4,18 +4,18 @@ version = 4
 
 [[package]]
 name = "tg-capi"
-version = "0.3.0"
+version = "1.0.0"
 dependencies = [
  "tg-core",
 ]
 
 [[package]]
 name = "tg-core"
-version = "0.3.0"
+version = "1.0.0"
 
 [[package]]
 name = "tg-move"
-version = "0.3.0"
+version = "1.0.0"
 dependencies = [
  "tg-capi",
  "tg-core",
