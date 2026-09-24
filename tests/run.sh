@@ -30,9 +30,10 @@ cc -std=c11 -Wall -Wextra -Isrc/dsp \
    tests/test_core.c "$ENGINE" -o build/test_core -lm
 ./build/test_core || exit 1
 
-# THE GOLDEN RENDER. 20 seconds of audio through the whole engine, compared
+# THE GOLDEN RENDER. Four seconds of audio through the whole engine, compared
 # by hash against a render captured before the engine was ever split out of
-# the Schwung module.
+# the Schwung module. (It said 20 seconds here for a long time; render_ref's
+# default is 4, and 705,600 bytes is what it writes.)
 #
 # This is the one check that the SOUND has not changed, and it is the reason
 # the 32-bit-mask widening to 128 steps could be done at all: a step shifted
