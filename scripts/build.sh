@@ -33,20 +33,22 @@ echo "Cross prefix: $CROSS_PREFIX"
 
 mkdir -p build "dist/$MODULE_ID"
 
-echo "Compiling DSP plugin..."
-${CROSS_PREFIX}gcc -Ofast -shared -fPIC \
-    -march=armv8-a -mtune=cortex-a72 \
-    -fomit-frame-pointer -fno-stack-protector \
-    -DNDEBUG \
-    src/dsp/trance_gate.c \
-    -o "build/${MODULE_ID}.so" \
-    -Isrc/dsp \
-    -lm
+echo "Compiling DSP plugin (Rust)..."
+# -Ofast IS GONE AND CANNOT COME BACK. The C build used it, which let clang
+# contract `a - b*c` into a fused multiply-add -- so the shipped .so and the
+# suite that tested it were never bit-identical to each other. Rust does not
+# contract, so the module and its tests now compute the same numbers, and the
+# golden render pins the algorithm rather than a compiler flag.
+cargo build --release -p tg-move --target aarch64-unknown-linux-gnu
 
 # THE .so NAME IS LOAD-BEARING. For component_type audio_fx the chain host
 # builds the path itself as modules/audio_fx/<id>/<id>.so and never reads
 # module.json's "dsp" field. Name it dsp.so and the module simply does not
 # load, with no error on screen -- one line in debug.log and nothing else.
+cp "target/aarch64-unknown-linux-gnu/release/libtg_move.so" "build/${MODULE_ID}.so"
+${CROSS_PREFIX}strip --strip-unneeded "build/${MODULE_ID}.so" 2>/dev/null || true
+echo "  size: $(wc -c < "build/${MODULE_ID}.so") bytes"
+
 echo "Packaging..."
 cat src/module.json                        > "dist/$MODULE_ID/module.json"
 cat "build/${MODULE_ID}.so"                > "dist/$MODULE_ID/${MODULE_ID}.so"

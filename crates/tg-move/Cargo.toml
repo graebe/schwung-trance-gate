@@ -11,3 +11,7 @@ crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
 tg-core = { path = "../tg-core" }
+# Pulled in so ONE staticlib carries both surfaces: the Schwung vtable and
+# the tg_core_* ABI the tests and the plugin link. Two staticlibs would each
+# bundle their own copy of the Rust runtime and collide.
+tg-capi = { path = "../tg-capi" }

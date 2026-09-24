@@ -15,10 +15,12 @@ if ! command -v cargo >/dev/null 2>&1; then
     TC="$(rustup which cargo 2>/dev/null)" || true
     [ -n "$TC" ] && PATH="$(dirname "$TC"):$PATH" && export PATH
 fi
-cargo build --release -p tg-capi
-ENGINE=target/release/libtg_capi.a
+cargo build --release -p tg-move
+# ONE staticlib carries both surfaces -- the Schwung vtable and the tg_core_*
+# ABI -- because two would each bundle a copy of the Rust runtime and collide.
+ENGINE=target/release/libtg_move.a
 cc -std=c11 -Wall -Wextra -Wno-unused-parameter -Isrc/dsp \
-   tests/test_gate.c src/dsp/trance_gate.c "$ENGINE" -o build/test_gate -lm
+   tests/test_gate.c "$ENGINE" -o build/test_gate -lm
 ./build/test_gate || exit 1
 
 # The portable engine's own tests: sample rate, the float paths and the
@@ -70,7 +72,7 @@ cc -std=c11 -Wall -Wextra -Isrc/dsp \
 # Previous: 4264807b9e7da87844309fa48d0cc8a3 (C, with contraction)
 GOLDEN=3992810c52d7962b4d25b3a30494ee2e
 cc -std=c11 -Wall -Wextra -Wno-unused-parameter -Isrc/dsp \
-   tests/render_ref.c src/dsp/trance_gate.c "$ENGINE" \
+   tests/render_ref.c "$ENGINE" \
    -o build/render_ref -lm
 GOT=$(./build/render_ref | md5 -q 2>/dev/null || ./build/render_ref | md5sum | cut -d" " -f1)
 echo
@@ -82,9 +84,23 @@ else
   exit 1
 fi
 
-# The UI smoke test needs the host's shared modules. They live in the sibling
-# schwung worktree; skip rather than fail when it is not checked out.
-SHARED="$(cd .. 2>/dev/null && pwd)/schwung/src/shared"
+# The UI smoke test needs the host's shared modules. SEARCH FOR THEM RATHER
+# THAN NAMING ONE PATH. A single "../schwung/src/shared" is right in a plain
+# checkout and wrong in a worktree, where .. is the worktree group directory --
+# so the 140 UI checks quietly skipped themselves for anyone working on a
+# branch, which is precisely the silent-no-fixture case the comment below
+# objects to. Set SCHWUNG_SHARED to override.
+if [ -n "$SCHWUNG_SHARED" ]; then
+  SHARED="$SCHWUNG_SHARED"
+else
+  SHARED=""
+  for d in ../schwung ../../schwung ../../../schwung/schwung ../../schwung/schwung; do
+    if [ -d "$d/src/shared/param_pages" ]; then
+      SHARED="$(cd "$d/src/shared" && pwd)"
+      break
+    fi
+  done
+fi
 if [ -d "$SHARED/param_pages" ]; then
   echo
   # ALWAYS REBUILD. This used to try the existing binary first and only
@@ -92,7 +108,7 @@ if [ -d "$SHARED/param_pages" ]; then
   # against the PREVIOUS build's JSON, silently, for as long as the old
   # binary kept working. A stale fixture reports the old contract as the
   # current one, which is worse than no fixture at all.
-  cc -std=c11 -Isrc/dsp tests/dump_params.c src/dsp/trance_gate.c "$ENGINE" \
+  cc -std=c11 -Isrc/dsp tests/dump_params.c "$ENGINE" \
      -o build/dump_params -lm
   ./build/dump_params > build/chain_params.json
   TG_PARAMS=build/chain_params.json node tests/smoke_ui.mjs "$SHARED" build/.smoke

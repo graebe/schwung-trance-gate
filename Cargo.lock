@@ -17,5 +17,6 @@ version = "0.3.0"
 name = "tg-move"
 version = "0.3.0"
 dependencies = [
+ "tg-capi",
  "tg-core",
 ]

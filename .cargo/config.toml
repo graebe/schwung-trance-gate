@@ -1,0 +1,13 @@
+# Tuning for the hardware the module actually runs on.
+#
+# The Move is a Cortex-A72 (CPU implementer 0x41, part 0xd08, features
+# "fp asimd evtstrm crc32 cpuid"). The C build always said
+# `-march=armv8-a -mtune=cortex-a72`; this is the same statement to rustc,
+# and it was worth making: measured on the device over 20,000 blocks,
+# process_block's median went 6.06us -> 5.57us.
+#
+# It changes scheduling, not arithmetic. Verified rather than assumed: the
+# 20-second golden render produced ON THE DEVICE with this flag is
+# 3992810c52d7962b4d25b3a30494ee2e, the same hash the host suite pins.
+[target.aarch64-unknown-linux-gnu]
+rustflags = ["-C", "target-cpu=cortex-a72"]
