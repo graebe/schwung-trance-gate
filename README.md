@@ -55,4 +55,21 @@ A beta is only offered when it is strictly newer than stable.
 
 ## Licence
 
-MIT. See `LICENSE`.
+**GPL-3.0-or-later**, for every crate here and for `src/ui_chain.js`. See
+`LICENSE`, which also ships inside the module tarball -- what lands on a device
+is a `.so` and a `.js` with no repository near them, so the terms have to
+travel with them.
+
+It was MIT until the Ableton Live plugin moved to
+[nih-plug](https://github.com/robbert-vdh/nih-plug), whose **VST3 bindings are
+GPLv3**. Anything linked into that binary has to be compatible with it, and
+`tg-core` is linked into it.
+
+Strictly, MIT would also have been compatible -- permissive code may be taken
+into a GPL work. One licence across the whole project was chosen over two
+because the alternative is a rule about which crate may be used where, and
+that is the kind of rule that is remembered wrongly.
+
+The Move module does not link nih-plug and would not have needed this. It
+carries the same licence anyway, so that the engine on the device and the
+engine in the plugin are the same thing in this respect as in every other.

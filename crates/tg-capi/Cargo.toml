@@ -2,7 +2,7 @@
 name = "tg-capi"
 version = "1.0.0"
 edition = "2021"
-license = "MIT"
+license = "GPL-3.0-or-later"
 description = "The tg_core_* C ABI over the Trance Gate engine"
 
 [lib]

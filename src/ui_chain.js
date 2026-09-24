@@ -1,4 +1,22 @@
 /*
+ * Trance Gate -- the module's editor.
+ * Copyright (C) 2026 Torben Graeber
+ *
+ * This program is free software: you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License as published by the Free
+ * Software Foundation, either version 3 of the License, or (at your option)
+ * any later version. It is distributed WITHOUT ANY WARRANTY; without even the
+ * implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details, in LICENSE beside this
+ * file in the module directory.
+ *
+ * THE HEADER IS HERE BECAUSE THIS FILE TRAVELS ALONE. It is installed into
+ * the module directory on the device as a bare .js, so it is the one piece of
+ * this program somebody is most likely to read without the repository around
+ * it.
+ *
+ * ---------------------------------------------------------------------------
+ *
  * trance-gate/ui_chain.js -- the module's editor.
  *
  * WHY THIS FILE EXISTS AT ALL. Pad editing needs host_pad_block(), which only
